@@ -273,7 +273,7 @@ function GLD:HandleRollSession(sender, payload)
     end
   end
 
-  if isTest and self.UI then
+  if (isTest or payload.reopen) and self.UI then
     self.UI:ShowRollPopup(session)
   end
 

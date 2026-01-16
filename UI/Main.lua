@@ -254,8 +254,8 @@ function UI:RefreshPendingVotes()
       return
     end
     local full = realm and realm ~= "" and (name .. "-" .. realm) or name
-    nameToInfo[name] = { name = name, class = classFile }
-    nameRealmToInfo[full] = { name = name, class = classFile }
+    nameToInfo[name] = { name = name, class = classFile, full = full }
+    nameRealmToInfo[full] = { name = name, class = classFile, full = full }
   end
 
   local function addUnit(unit)
@@ -269,7 +269,8 @@ function UI:RefreshPendingVotes()
     local classFile = select(2, UnitClass(unit))
     local guid = UnitGUID(unit)
     if guid then
-      guidToInfo[guid] = { name = name, class = classFile }
+      local full = realm and realm ~= "" and (name .. "-" .. realm) or name
+      guidToInfo[guid] = { name = name, class = classFile, full = full }
     end
     addName(name, realm, classFile)
   end
@@ -316,25 +317,25 @@ function UI:RefreshPendingVotes()
 
   local function getNameAndClass(key)
     if not key then
-      return "?", nil
+      return "?", nil, nil
     end
     local guidMatch = guidToInfo[key]
     if guidMatch then
-      return guidMatch.name, guidMatch.class
+      return guidMatch.name, guidMatch.class, guidMatch.full
     end
     local nameMatch = nameRealmToInfo[key]
     if nameMatch then
-      return nameMatch.name, nameMatch.class
+      return nameMatch.name, nameMatch.class, nameMatch.full
     end
     local name = NS:GetNameRealmFromKey(key)
     if name and nameToInfo[name] then
       local info = nameToInfo[name]
-      return info.name, info.class
+      return info.name, info.class, info.full
     end
     if name then
-      return name, nil
+      return name, nil, name
     end
-    return tostring(key), nil
+    return tostring(key), nil, tostring(key)
   end
 
   local function colorizeName(name, classFile)
@@ -352,10 +353,14 @@ function UI:RefreshPendingVotes()
     local expected = session.expectedVoters or {}
     local votes = session.votes or {}
     local pending = {}
+    local pendingTargets = {}
     for _, key in ipairs(expected) do
       if not votes[key] then
-        local name, classFile = getNameAndClass(key)
+        local name, classFile, full = getNameAndClass(key)
         pending[#pending + 1] = colorizeName(name, classFile)
+        if full and full ~= "" then
+          pendingTargets[#pendingTargets + 1] = full
+        end
       end
     end
 
@@ -408,13 +413,36 @@ function UI:RefreshPendingVotes()
     row:AddChild(itemLabel)
 
     local waitingLabel = AceGUI:Create("Label")
-    waitingLabel:SetWidth(180)
+    waitingLabel:SetWidth(140)
     if #pending == 0 then
       waitingLabel:SetText("|cffaaaaaaWaiting: none|r")
     else
       waitingLabel:SetText("|cffaaaaaaWaiting: " .. table.concat(pending, ", ") .. "|r")
     end
     row:AddChild(waitingLabel)
+
+    if GLD:IsAuthority() and #pendingTargets > 0 then
+      local reopenBtn = AceGUI:Create("Button")
+      reopenBtn:SetText("Reopen")
+      reopenBtn:SetWidth(70)
+      reopenBtn:SetCallback("OnClick", function()
+        for _, target in ipairs(pendingTargets) do
+          GLD:SendCommMessageSafe(NS.MSG.ROLL_SESSION, {
+            rollID = session.rollID,
+            rollTime = session.rollTime,
+            itemLink = session.itemLink,
+            itemName = session.itemName,
+            quality = session.quality,
+            canNeed = session.canNeed,
+            canGreed = session.canGreed,
+            canTransmog = session.canTransmog,
+            test = session.isTest,
+            reopen = true,
+          }, "WHISPER", target)
+        end
+      end)
+      row:AddChild(reopenBtn)
+    end
 
     self.pendingScroll:AddChild(row)
   end
@@ -624,6 +652,45 @@ function UI:ShowRollPopup(session)
   frame:SetHeight(240)
   frame:SetLayout("Flow")
   frame:EnableResize(false)
+  if frame.frame and frame.frame.SetBackdrop then
+    frame.frame:SetBackdrop({
+      bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+      edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+      tile = true,
+      tileSize = 8,
+      edgeSize = 10,
+      insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    frame.frame:SetBackdropColor(0, 0, 0, 1)
+  end
+
+  local icon = "Interface\\Icons\\INV_Misc_QuestionMark"
+  if session.itemLink then
+    local itemIcon = select(10, GetItemInfo(session.itemLink))
+    if itemIcon then
+      icon = itemIcon
+    else
+      GLD:RequestItemData(session.itemLink)
+    end
+  end
+
+  local iconWidget = AceGUI:Create("Icon")
+  iconWidget:SetImage(icon)
+  iconWidget:SetImageSize(28, 28)
+  iconWidget:SetWidth(32)
+  iconWidget:SetHeight(32)
+  iconWidget:SetCallback("OnEnter", function()
+    local link = session.itemLink
+    if link and link ~= "" then
+      GameTooltip:SetOwner(iconWidget.frame, "ANCHOR_CURSOR")
+      GameTooltip:SetHyperlink(link)
+      GameTooltip:Show()
+    end
+  end)
+  iconWidget:SetCallback("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+  frame:AddChild(iconWidget)
 
   local itemLabel = AceGUI:Create("InteractiveLabel")
   itemLabel:SetFullWidth(true)

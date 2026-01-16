@@ -158,6 +158,10 @@ function GLD:FinalizeRoll(session)
   if winnerPlayer and winnerPlayer.realm and winnerPlayer.realm ~= "" then
     winnerFull = winnerPlayer.name .. "-" .. winnerPlayer.realm
   end
+  if winnerPlayer then
+    winnerPlayer.numAccepted = (winnerPlayer.numAccepted or 0) + 1
+    winnerPlayer.lastWinAt = GetServerTime()
+  end
 
   local result = {
     rollID = session.rollID,
@@ -175,6 +179,10 @@ function GLD:FinalizeRoll(session)
   self:RecordRollHistory(result)
   if self:IsAuthority() then
     self:AnnounceRollResult(result)
+    if winnerKey then
+      self:MoveToQueueBottom(winnerKey)
+      self:BroadcastSnapshot()
+    end
     local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
     self:SendCommMessageSafe(NS.MSG.ROLL_RESULT, result, channel)
   end

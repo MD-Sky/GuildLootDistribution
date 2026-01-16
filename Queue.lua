@@ -6,6 +6,7 @@ function GLD:RemoveFromQueue(key)
   if not key then
     return
   end
+  self.db.queue = self.db.queue or {}
   for i, k in ipairs(self.db.queue) do
     if k == key then
       table.remove(self.db.queue, i)
@@ -22,6 +23,7 @@ function GLD:InsertToQueue(key, position)
   if not key then
     return
   end
+  self.db.queue = self.db.queue or {}
   local count = #self.db.queue
   local pos = tonumber(position)
   if not pos or pos < 1 or pos > count + 1 then
@@ -31,11 +33,12 @@ function GLD:InsertToQueue(key, position)
   self:CompactQueue()
   local player = self.db.players[key]
   if player then
-    player.savedPos = nil
+    player.savedPos = 0
   end
 end
 
 function GLD:CompactQueue()
+  self.db.queue = self.db.queue or {}
   local newQueue = {}
   local seen = {}
   for _, key in ipairs(self.db.queue) do
@@ -78,4 +81,27 @@ function GLD:SetAttendance(key, state)
     end
     player.attendance = "PRESENT"
   end
+end
+
+function GLD:EnsureQueuePositions()
+  self.db.queue = self.db.queue or {}
+  local inQueue = {}
+  for _, key in ipairs(self.db.queue) do
+    inQueue[key] = true
+  end
+  for key, player in pairs(self.db.players or {}) do
+    if player and player.attendance == "PRESENT" and not inQueue[key] then
+      table.insert(self.db.queue, key)
+      inQueue[key] = true
+    end
+  end
+  self:CompactQueue()
+end
+
+function GLD:MoveToQueueBottom(key)
+  if not key then
+    return
+  end
+  self:RemoveFromQueue(key)
+  self:InsertToQueue(key)
 end

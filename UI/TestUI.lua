@@ -312,6 +312,20 @@ local function EJ_Call(name, ...)
   return nil
 end
 
+local DEFAULT_TEST_RAID = "Manaforge Omega"
+local DEFAULT_TEST_ENCOUNTER = "Manaforge Omega"
+
+local function ColorizeClassName(name, classFile)
+  if not name then
+    return "?"
+  end
+  if classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile] then
+    local c = RAID_CLASS_COLORS[classFile]
+    return string.format("|cff%02x%02x%02x%s|r", c.r * 255, c.g * 255, c.b * 255, name)
+  end
+  return name
+end
+
 function TestUI:SetEJStatus(text)
   if self.ejStatusLabel then
     self.ejStatusLabel:SetText(text or "")
@@ -323,6 +337,7 @@ function GLD:InitTestUI()
   TestUI.testVotes = {}
   TestUI.currentVoterIndex = 0
   TestUI.disableManualVotes = true
+  TestUI.queueEditEnabled = false
 end
 
 function TestUI:ResetTestVotes()
@@ -436,6 +451,19 @@ function TestUI:CreateTestFrame()
     TestUI:RefreshTestPanel()
   end)
   sessionGroup:AddChild(endBtn)
+
+  local queueEditBtn = AceGUI:Create("Button")
+  queueEditBtn:SetWidth(150)
+  local function updateQueueEditLabel()
+    queueEditBtn:SetText(TestUI.queueEditEnabled and "Queue Edit: On" or "Queue Edit: Off")
+  end
+  updateQueueEditLabel()
+  queueEditBtn:SetCallback("OnClick", function()
+    TestUI.queueEditEnabled = not TestUI.queueEditEnabled
+    updateQueueEditLabel()
+    TestUI:RefreshTestPanel()
+  end)
+  sessionGroup:AddChild(queueEditBtn)
 
   local sessionStatus = AceGUI:Create("Label")
   sessionStatus:SetFullWidth(true)
@@ -595,6 +623,8 @@ function TestUI:CreateTestFrame()
     TestUI:UpdateSelectedItemInfo()
   end)
   self:UpdateSelectedItemInfo()
+
+  frame:Hide()
 end
 
 function TestUI:RefreshTestPanel()
@@ -620,6 +650,20 @@ function TestUI:RefreshTestPanel()
     if a.attendance ~= "PRESENT" and b.attendance == "PRESENT" then
       return false
     end
+    if a.attendance == "PRESENT" and b.attendance == "PRESENT" then
+      local posA = a.queuePos or 99999
+      local posB = b.queuePos or 99999
+      if posA ~= posB then
+        return posA < posB
+      end
+    end
+    if a.attendance ~= "PRESENT" and b.attendance ~= "PRESENT" then
+      local posA = a.savedPos or 99999
+      local posB = b.savedPos or 99999
+      if posA ~= posB then
+        return posA < posB
+      end
+    end
     return (a.name or "") < (b.name or "")
   end)
 
@@ -630,19 +674,16 @@ function TestUI:RefreshTestPanel()
 
     local nameLabel = AceGUI:Create("Label")
     local displayName = player.name or "?"
-    if player.realm and player.realm ~= "" then
-      displayName = displayName .. "-" .. player.realm
-    end
     if player._isGuest then
       displayName = displayName .. " (Party)"
     end
-    nameLabel:SetText(displayName)
-    nameLabel:SetWidth(150)
+    nameLabel:SetText(ColorizeClassName(displayName, player.class))
+    nameLabel:SetWidth(160)
     row:AddChild(nameLabel)
 
     local attendanceLabel = AceGUI:Create("Label")
-    attendanceLabel:SetText(NS:ColorAttendance(player.attendance))
-    attendanceLabel:SetWidth(100)
+    attendanceLabel:SetText(player.attendance or "-")
+    attendanceLabel:SetWidth(80)
     row:AddChild(attendanceLabel)
 
     local toggleBtn = AceGUI:Create("Button")
@@ -664,6 +705,32 @@ function TestUI:RefreshTestPanel()
       end)
     end
     row:AddChild(toggleBtn)
+
+    if self.queueEditEnabled and not player._isGuest then
+      local queueBox = AceGUI:Create("EditBox")
+      queueBox:SetLabel("Queue")
+      queueBox:SetText(tostring(player.queuePos or ""))
+      queueBox:SetWidth(60)
+      queueBox:SetCallback("OnEnterPressed", function(_, _, value)
+        local pos = tonumber(value)
+        if GLD.db.players[playerKey] then
+          GLD:RemoveFromQueue(playerKey)
+          GLD:InsertToQueue(playerKey, pos)
+          TestUI:RefreshTestPanel()
+        end
+      end)
+      row:AddChild(queueBox)
+    else
+      local queueLabel = AceGUI:Create("Label")
+      queueLabel:SetText(tostring(player.queuePos or "-"))
+      queueLabel:SetWidth(60)
+      row:AddChild(queueLabel)
+    end
+
+    local frozenLabel = AceGUI:Create("Label")
+    frozenLabel:SetText(tostring(player.savedPos or 0))
+    frozenLabel:SetWidth(60)
+    row:AddChild(frozenLabel)
 
     local wonBox = AceGUI:Create("EditBox")
     wonBox:SetLabel("Won")
@@ -1052,9 +1119,18 @@ function TestUI:RefreshInstanceList()
 
   self:SetEJStatus("Encounter Journal: ready")
 
-  if not self.selectedInstance and order[1] then
-    self.instanceSelect:SetValue(order[1])
-    self:SelectInstance(order[1])
+  local defaultInstanceId = nil
+  for instanceId, name in pairs(values) do
+    if name == DEFAULT_TEST_RAID then
+      defaultInstanceId = instanceId
+      break
+    end
+  end
+
+  if not self.selectedInstance and (defaultInstanceId or order[1]) then
+    local selected = defaultInstanceId or order[1]
+    self.instanceSelect:SetValue(selected)
+    self:SelectInstance(selected)
   end
 end
 
@@ -1122,9 +1198,14 @@ function TestUI:SelectInstance(instanceID)
     self:SetEJStatus("Encounter Journal: no encounters for raid")
     GLD:Debug("EJ encounters = 0 for instance " .. tostring(instanceID))
   end
+  local defaultEncounterIndex = nil
+  if DEFAULT_TEST_ENCOUNTER and self.encounterNameToIndex then
+    defaultEncounterIndex = self.encounterNameToIndex[DEFAULT_TEST_ENCOUNTER]
+  end
   if order[1] then
-    self.encounterSelect:SetValue(order[1])
-    self:SelectEncounter(order[1])
+    local selected = defaultEncounterIndex or order[1]
+    self.encounterSelect:SetValue(selected)
+    self:SelectEncounter(selected)
   end
 end
 

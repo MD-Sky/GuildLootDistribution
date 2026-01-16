@@ -8,6 +8,10 @@ local DEFAULT_CONFIG = {
   transmogWinnerMove = "END",
   greedWinnerMove = "NONE",
   debugLogs = false,
+  minimap = {
+    hide = false,
+    angle = 220,
+  },
 }
 
 local function InitMasterDB()

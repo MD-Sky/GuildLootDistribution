@@ -30,6 +30,8 @@ Comms.lua
 Item.lua
 Loot.lua
 Config.lua
+GuildUI.lua
+Minimap.lua
 TestData.lua
 UI\Main.lua
 UI\Admin.lua

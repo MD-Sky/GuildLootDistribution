@@ -71,6 +71,7 @@ function GLD:OnInitialize()
   self:InitComms()
   self:InitUI()
   self:InitTestUI()
+  self:InitMinimapButton()
   self:InitAttendance()
   self:InitLoot()
   self:RegisterSlashCommands()
@@ -81,6 +82,10 @@ function GLD:OnEnable()
   self:RegisterEvent("PLAYER_ENTERING_WORLD", "OnGroupRosterUpdate")
   self:RegisterEvent("PLAYER_ROLES_ASSIGNED", "OnGroupRosterUpdate")
   self:RegisterEvent("PLAYER_GUILD_UPDATE", "OnGroupRosterUpdate")
+  self:RegisterEvent("ADDON_LOADED", "OnAddonLoaded")
+  if self.TryCreateGuildUIButton then
+    self:TryCreateGuildUIButton()
+  end
   self:Print("Commands: /gld (main UI), /disadmin (admin), /gldtest (seed test), /gldadmintest (admin test panel)")
 end
 

@@ -20,6 +20,7 @@ function GLD:StartSession()
   self.db.session.startedAt = GetServerTime()
   self.db.session.attended = {}
   self:AutoMarkCurrentGroup()
+  self:EnsureQueuePositions()
   self:BroadcastSnapshot()
   self:Print("Session started")
 end
