@@ -53,4 +53,18 @@ function CTL:SendChatMessage(prio, text, chatType, language, target, queueName, 
   return result
 end
 
+function CTL:Enqueue(prio, prefix, text, distribution, target, queueName, callbackFn, callbackArg)
+  if prefix and text and distribution then
+    return self:SendAddonMessage(prio, prefix, text, distribution, target, queueName, callbackFn, callbackArg)
+  end
+  if callbackFn then
+    local sent = callbackArg
+    if type(sent) ~= "number" then
+      sent = #(text or "")
+    end
+    callbackFn(sent, true)
+  end
+  return true
+end
+
 ChatThrottleLib = CTL

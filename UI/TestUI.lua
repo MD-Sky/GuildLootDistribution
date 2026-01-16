@@ -80,6 +80,35 @@ local function GetActiveVoters()
   return TestUI.dynamicVoters or TEST_VOTERS
 end
 
+local function BuildTestRosterList()
+  local list = {}
+  if TestUI.dynamicVoters and #TestUI.dynamicVoters > 0 then
+    for _, voter in ipairs(TestUI.dynamicVoters) do
+      local name, realm = NS:SplitNameRealm(voter.name)
+      local key = GLD:FindPlayerKeyByName(name, realm)
+      if key and GLD.db.players[key] then
+        list[#list + 1] = GLD.db.players[key]
+      else
+        list[#list + 1] = {
+          name = name,
+          realm = realm or GetRealmName(),
+          class = voter.class,
+          attendance = "PRESENT",
+          numAccepted = 0,
+          attendanceCount = 0,
+          _isGuest = true,
+        }
+      end
+    end
+    return list
+  end
+
+  for _, player in pairs(GLD.db.players) do
+    list[#list + 1] = player
+  end
+  return list
+end
+
 local function GetTestVoter(index)
   return GetActiveVoters()[index]
 end
@@ -548,10 +577,7 @@ function TestUI:RefreshTestPanel()
 
   GLD:Print("RefreshTestPanel: resultsScroll=" .. tostring(self.resultsScroll))
 
-  local list = {}
-  for _, player in pairs(GLD.db.players) do
-    table.insert(list, player)
-  end
+  local list = BuildTestRosterList()
 
   table.sort(list, function(a, b)
     if a.attendance == "PRESENT" and b.attendance ~= "PRESENT" then
@@ -569,7 +595,14 @@ function TestUI:RefreshTestPanel()
     row:SetLayout("Flow")
 
     local nameLabel = AceGUI:Create("Label")
-    nameLabel:SetText(player.name or "?")
+    local displayName = player.name or "?"
+    if player.realm and player.realm ~= "" then
+      displayName = displayName .. "-" .. player.realm
+    end
+    if player._isGuest then
+      displayName = displayName .. " (Party)"
+    end
+    nameLabel:SetText(displayName)
     nameLabel:SetWidth(150)
     row:AddChild(nameLabel)
 
@@ -582,37 +615,56 @@ function TestUI:RefreshTestPanel()
     toggleBtn:SetText(player.attendance == "PRESENT" and "Mark Absent" or "Mark Present")
     toggleBtn:SetWidth(120)
     local playerKey = player.name .. "-" .. (player.realm or GetRealmName())
-    toggleBtn:SetCallback("OnClick", function()
-      if GLD.db.players[playerKey] then
-        local newState = GLD.db.players[playerKey].attendance == "PRESENT" and "ABSENT" or "PRESENT"
-        GLD:SetAttendance(playerKey, newState)
-        TestUI:RefreshTestPanel()
+    if player._isGuest then
+      toggleBtn:SetText("Party Member")
+      if toggleBtn.SetDisabled then
+        toggleBtn:SetDisabled(true)
       end
-    end)
+    else
+      toggleBtn:SetCallback("OnClick", function()
+        if GLD.db.players[playerKey] then
+          local newState = GLD.db.players[playerKey].attendance == "PRESENT" and "ABSENT" or "PRESENT"
+          GLD:SetAttendance(playerKey, newState)
+          TestUI:RefreshTestPanel()
+        end
+      end)
+    end
     row:AddChild(toggleBtn)
 
     local wonBox = AceGUI:Create("EditBox")
     wonBox:SetLabel("Won")
     wonBox:SetText(tostring(player.numAccepted or 0))
     wonBox:SetWidth(80)
-    wonBox:SetCallback("OnEnterPressed", function(_, _, value)
-      local num = tonumber(value) or 0
-      if GLD.db.players[playerKey] then
-        GLD.db.players[playerKey].numAccepted = num
+    if player._isGuest then
+      if wonBox.SetDisabled then
+        wonBox:SetDisabled(true)
       end
-    end)
+    else
+      wonBox:SetCallback("OnEnterPressed", function(_, _, value)
+        local num = tonumber(value) or 0
+        if GLD.db.players[playerKey] then
+          GLD.db.players[playerKey].numAccepted = num
+        end
+      end)
+    end
     row:AddChild(wonBox)
 
     local raidsBox = AceGUI:Create("EditBox")
     raidsBox:SetLabel("Raids")
     raidsBox:SetText(tostring(player.attendanceCount or 0))
     raidsBox:SetWidth(80)
-    raidsBox:SetCallback("OnEnterPressed", function(_, _, value)
-      local num = tonumber(value) or 0
-      if GLD.db.players[playerKey] then
-        GLD.db.players[playerKey].attendanceCount = num
+    if player._isGuest then
+      if raidsBox.SetDisabled then
+        raidsBox:SetDisabled(true)
       end
-    end)
+    else
+      raidsBox:SetCallback("OnEnterPressed", function(_, _, value)
+        local num = tonumber(value) or 0
+        if GLD.db.players[playerKey] then
+          GLD.db.players[playerKey].attendanceCount = num
+        end
+      end)
+    end
     row:AddChild(raidsBox)
 
     self.rosterScroll:AddChild(row)
@@ -815,13 +867,17 @@ function TestUI:RefreshResultsPanel()
     if vote == "NEED" and itemLink and not IsNeedAllowedForEntry(entry, itemLink) then
       vote = "NEED (ineligible)"
     end
+    local nameText = entry.name or "-"
+    local classText = entry.class or "-"
+    local armorText = entry.armor or "-"
+    local weaponText = entry.weapon or "-"
     row:SetText(string.format("%s | %s | %s | %s | %s | %s",
-      entry.name,
+      nameText,
       vote,
-      lootType,
-      entry.class,
-      entry.armor,
-      entry.weapon
+      lootType or "-",
+      classText,
+      armorText,
+      weaponText
     ))
     self.resultsScroll:AddChild(row)
   end

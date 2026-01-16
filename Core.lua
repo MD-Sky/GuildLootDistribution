@@ -44,6 +44,12 @@ function GLD:IsAdmin()
     if rankIndex ~= nil and rankIndex == 0 then
       return true
     end
+    if rankIndex ~= nil and GuildControlGetNumRanks then
+      local rankName = GuildControlGetRankName(rankIndex + 1)
+      if rankName and rankName:lower() == "officer" then
+        return true
+      end
+    end
   end
   return false
 end
