@@ -316,6 +316,7 @@ function GLD:InitTestUI()
   TestUI.testFrame = nil
   TestUI.testVotes = {}
   TestUI.currentVoterIndex = 0
+  TestUI.disableManualVotes = true
 end
 
 function TestUI:ResetTestVotes()
@@ -702,7 +703,23 @@ function TestUI:RefreshVotePanel()
     self:RefreshVotePanel()
     self:RefreshResultsPanel()
   end)
+  if self.disableManualVotes then
+    if resetBtn.SetDisabled then
+      resetBtn:SetDisabled(true)
+    end
+  end
   self.voteScroll:AddChild(resetBtn)
+
+  if self.disableManualVotes then
+    if self.voteGroup then
+      self.voteGroup:SetTitle("Test Vote Selection (live)")
+    end
+    local infoLabel = AceGUI:Create("Label")
+    infoLabel:SetFullWidth(true)
+    infoLabel:SetText("Manual voting disabled. Waiting for live votes sent to the authority.")
+    self.voteScroll:AddChild(infoLabel)
+    return
+  end
 
   local activeVoters = GetActiveVoters()
   local currentEntry = activeVoters[self.currentVoterIndex + 1]
@@ -776,10 +793,29 @@ function TestUI:RefreshResultsPanel()
   self.resultsScroll:AddChild(header)
 
   local itemLink = NormalizeItemInput(self.itemLinkInput and self.itemLinkInput:GetText() or nil)
+  local liveSession = nil
+  if self.disableManualVotes and self.currentTestRollID and GLD.activeRolls then
+    local candidate = GLD.activeRolls[self.currentTestRollID]
+    if candidate and candidate.isTest then
+      liveSession = candidate
+    end
+  end
+  local liveVotes = liveSession and liveSession.votes or nil
+
+  local function getVoteForEntry(entry)
+    if not entry then
+      return nil
+    end
+    if liveVotes then
+      local key = GLD:GetRollCandidateKey(entry.name)
+      return liveVotes[key] or liveVotes[entry.name]
+    end
+    return self.testVotes[entry.name]
+  end
   local counts = { NEED = 0, GREED = 0, TRANSMOG = 0, PASS = 0 }
   local activeVoters = GetActiveVoters()
   for _, entry in ipairs(activeVoters) do
-    local vote = self.testVotes[entry.name]
+    local vote = getVoteForEntry(entry)
     if vote and counts[vote] then
       if vote == "NEED" and itemLink then
         if IsNeedAllowedForEntry(entry, itemLink) then
@@ -798,10 +834,19 @@ function TestUI:RefreshResultsPanel()
   self.resultsScroll:AddChild(summary)
 
   local allDone = true
-  for _, entry in ipairs(activeVoters) do
-    if not self.testVotes[entry.name] then
-      allDone = false
-      break
+  if liveSession and liveSession.expectedVoters then
+    for _, key in ipairs(liveSession.expectedVoters) do
+      if not (liveVotes and liveVotes[key]) then
+        allDone = false
+        break
+      end
+    end
+  else
+    for _, entry in ipairs(activeVoters) do
+      if not getVoteForEntry(entry) then
+        allDone = false
+        break
+      end
     end
   end
 
@@ -813,7 +858,7 @@ function TestUI:RefreshResultsPanel()
     local lootArmorType = GetArmorTypeOnly(itemLink)
     if lootArmorType == "Cloth" or lootArmorType == "Leather" or lootArmorType == "Mail" or lootArmorType == "Plate" then
       for _, entry in ipairs(activeVoters) do
-        if entry.armor == lootArmorType and self.testVotes[entry.name] == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) then
+        if entry.armor == lootArmorType and getVoteForEntry(entry) == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) then
           winner = entry.name
           break
         end
@@ -822,7 +867,7 @@ function TestUI:RefreshResultsPanel()
 
     if not winner and counts.NEED > 0 then
       for _, entry in ipairs(activeVoters) do
-        if self.testVotes[entry.name] == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) then
+        if getVoteForEntry(entry) == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) then
           winner = entry.name
           break
         end
@@ -831,14 +876,14 @@ function TestUI:RefreshResultsPanel()
 
     if not winner and counts.GREED > 0 then
       for _, entry in ipairs(activeVoters) do
-        if self.testVotes[entry.name] == "GREED" then
+        if getVoteForEntry(entry) == "GREED" then
           winner = entry.name
           break
         end
       end
     elseif not winner and counts.TRANSMOG > 0 then
       for _, entry in ipairs(activeVoters) do
-        if self.testVotes[entry.name] == "TRANSMOG" then
+        if getVoteForEntry(entry) == "TRANSMOG" then
           winner = entry.name
           break
         end
@@ -875,7 +920,7 @@ function TestUI:RefreshResultsPanel()
   for _, entry in ipairs(activeVoters) do
     local row = AceGUI:Create("Label")
     row:SetFullWidth(true)
-    local vote = self.testVotes[entry.name] or "-"
+    local vote = getVoteForEntry(entry) or "-"
     if vote == "NEED" and itemLink and not IsNeedAllowedForEntry(entry, itemLink) then
       vote = "NEED (ineligible)"
     end
@@ -1257,10 +1302,12 @@ function TestUI:SimulateLootRoll(itemLink)
     canGreed = true,
     canTransmog = true,
     votes = {},
+    expectedVoters = GLD:BuildExpectedVoters(),
     isTest = true,
   }
 
   GLD.activeRolls[rollID] = session
+  self.currentTestRollID = rollID
 
   if GLD.UI then
     local voter = nil
