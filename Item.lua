@@ -53,7 +53,21 @@ function GLD:RequestItemData(item)
   if not item then
     return
   end
-  C_Item.RequestLoadItemData(item)
+  if type(item) == "table" and item.GetEquipmentSlot then
+    C_Item.RequestLoadItemData(item)
+    return
+  end
+
+  local itemID = nil
+  if type(item) == "number" then
+    itemID = item
+  elseif type(item) == "string" then
+    itemID = tonumber(item:match("item:(%d+)")) or tonumber(item:match("^%d+$"))
+  end
+
+  if itemID then
+    C_Item.RequestLoadItemDataByID(itemID)
+  end
 end
 
 function GLD:IsEligibleForNeed(classFile, item)

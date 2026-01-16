@@ -35,6 +35,8 @@
         "NOT_BOUND",
         "IsSecureCmd",
         "NUM_CHAT_WINDOWS",
-        "ChatEdit_GetActiveWindow"
+        "ChatEdit_GetActiveWindow",
+        "EncounterJournal",
+        "EncounterJournal_LoadUI"
     ]
 }
