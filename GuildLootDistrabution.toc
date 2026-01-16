@@ -32,3 +32,4 @@ Config.lua
 TestData.lua
 UI\Main.lua
 UI\Admin.lua
+UI\TestUI.lua

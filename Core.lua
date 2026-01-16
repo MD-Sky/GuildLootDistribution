@@ -52,6 +52,7 @@ function GLD:OnInitialize()
   self:InitConfig()
   self:InitComms()
   self:InitUI()
+  self:InitTestUI()
   self:InitAttendance()
   self:InitLoot()
   self:RegisterSlashCommands()
@@ -87,5 +88,14 @@ function GLD:RegisterSlashCommands()
       return
     end
     self:SeedTestData()
+  end
+
+  SLASH_GLDADMINTEST1 = "/gldadmintest"
+  SlashCmdList["GLDADMINTEST"] = function()
+    if not self:IsAdmin() then
+      self:Print("you do not have Guild Permission to access this panel")
+      return
+    end
+    NS.TestUI:ToggleTestPanel()
   end
 end

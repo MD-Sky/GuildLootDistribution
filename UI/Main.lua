@@ -373,9 +373,20 @@ function UI:ShowRollPopup(session)
   frame:SetLayout("Flow")
   frame:EnableResize(false)
 
-  local itemLabel = AceGUI:Create("Label")
+  local itemLabel = AceGUI:Create("InteractiveLabel")
   itemLabel:SetFullWidth(true)
   itemLabel:SetText(session.itemLink or session.itemName or "Unknown Item")
+  itemLabel:SetCallback("OnEnter", function()
+    local link = session.itemLink
+    if link and link ~= "" then
+      GameTooltip:SetOwner(frame.frame, "ANCHOR_CURSOR")
+      GameTooltip:SetHyperlink(link)
+      GameTooltip:Show()
+    end
+  end)
+  itemLabel:SetCallback("OnLeave", function()
+    GameTooltip:Hide()
+  end)
   frame:AddChild(itemLabel)
 
   local buttons = {
