@@ -7,33 +7,89 @@ function GLD:GetAuthorityName()
     return nil
   end
 
-  if UnitIsGroupLeader("player") and self:IsAdmin() then
-    local name, realm = UnitName("player")
+  local function fullName(unit)
+    local name, realm = UnitName(unit)
+    if not name then
+      return nil
+    end
     if realm and realm ~= "" then
       return name .. "-" .. realm
     end
     return name
   end
 
-  local assistants = {}
+  local function isGuildMaster(unit)
+    local _, _, rankIndex = GetGuildInfo(unit)
+    return rankIndex == 0
+  end
+
+  local function isOfficer(unit)
+    local _, rankName, rankIndex = GetGuildInfo(unit)
+    if rankIndex == 0 then
+      return true
+    end
+    return rankName and rankName:lower() == "officer"
+  end
+
+  local function isRaidLeaderOrAssistant(unit)
+    return UnitIsGroupLeader(unit) or UnitIsGroupAssistant(unit)
+  end
+
+  local gm = nil
   if IsInRaid() then
     for i = 1, GetNumGroupMembers() do
       local unit = "raid" .. i
-      if UnitIsGroupAssistant(unit) then
-        local name, realm = UnitName(unit)
-        if name then
-          if realm and realm ~= "" then
-            table.insert(assistants, name .. "-" .. realm)
-          else
-            table.insert(assistants, name)
-          end
-        end
+      if UnitExists(unit) and UnitIsConnected(unit) and isGuildMaster(unit) then
+        gm = fullName(unit)
+        break
+      end
+    end
+  else
+    if UnitExists("player") and UnitIsConnected("player") and isGuildMaster("player") then
+      gm = fullName("player")
+    end
+    for i = 1, GetNumSubgroupMembers() do
+      local unit = "party" .. i
+      if UnitExists(unit) and UnitIsConnected(unit) and isGuildMaster(unit) then
+        gm = fullName(unit)
+        break
       end
     end
   end
 
-  table.sort(assistants)
-  return assistants[1]
+  if gm then
+    return gm
+  end
+
+  local officers = {}
+  local function consider(unit)
+    if UnitExists(unit) and UnitIsConnected(unit) and isOfficer(unit) and isRaidLeaderOrAssistant(unit) then
+      local name = fullName(unit)
+      if name then
+        table.insert(officers, { name = name, leader = UnitIsGroupLeader(unit) })
+      end
+    end
+  end
+
+  if IsInRaid() then
+    for i = 1, GetNumGroupMembers() do
+      consider("raid" .. i)
+    end
+  else
+    consider("player")
+    for i = 1, GetNumSubgroupMembers() do
+      consider("party" .. i)
+    end
+  end
+
+  table.sort(officers, function(a, b)
+    if a.leader ~= b.leader then
+      return a.leader
+    end
+    return a.name < b.name
+  end)
+
+  return officers[1] and officers[1].name or nil
 end
 
 function GLD:IsAuthority()

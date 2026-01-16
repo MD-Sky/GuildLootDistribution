@@ -28,6 +28,9 @@ function GLD:BuildExpectedVoters()
   local seen = {}
 
   local function addUnit(unit)
+    if not UnitExists(unit) or not UnitIsConnected(unit) then
+      return
+    end
     local key = NS:GetPlayerKeyFromUnit(unit)
     if key and not seen[key] then
       table.insert(list, key)
@@ -172,7 +175,8 @@ function GLD:FinalizeRoll(session)
   self:RecordRollHistory(result)
   if self:IsAuthority() then
     self:AnnounceRollResult(result)
-    self:SendCommMessageSafe(NS.MSG.ROLL_RESULT, result, "RAID")
+    local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
+    self:SendCommMessageSafe(NS.MSG.ROLL_RESULT, result, channel)
   end
 end
 
@@ -205,13 +209,14 @@ function GLD:NoteMismatch(session, playerName, expectedVote, actualVote)
   })
   if self:IsAuthority() then
     local msg = string.format("GLD mismatch: %s declared %s but rolled %s", tostring(playerName), tostring(expectedVote), tostring(actualVote))
-    SendChatMessage(msg, "RAID")
+    local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
+    SendChatMessage(msg, channel)
     self:SendCommMessageSafe(NS.MSG.ROLL_MISMATCH, {
       rollID = session.rollID,
       name = playerName,
       expected = expectedVote,
       actual = actualVote,
-    }, "RAID")
+    }, channel)
   end
 end
 

@@ -307,6 +307,9 @@ function GLD:HandleRollResult(sender, payload)
   end
   self:RecordRollHistory(payload)
   self:Print("GLD Result: " .. tostring(payload.itemName or payload.itemLink or "Item") .. " -> " .. tostring(payload.winnerName or "None"))
+  if self.UI and self.UI.ShowRollResultPopup then
+    self.UI:ShowRollResultPopup(payload)
+  end
 end
 
 function GLD:HandleRollMismatch(sender, payload)

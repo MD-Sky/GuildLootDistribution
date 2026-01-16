@@ -856,6 +856,18 @@ function TestUI:RefreshResultsPanel()
     local lootTypeDetail = GetLootTypeDetailed(itemLink)
     local lootArmorType = GetArmorTypeOnly(itemLink)
     winnerLabel:SetText(string.format("Winner: %s | Armor: %s | Loot Armor: %s | Loot: %s", winner or "None", winnerArmor, lootArmorType, lootTypeDetail))
+
+    if GLD.UI and GLD.UI.ShowRollResultPopup then
+      local key = tostring(itemLink or "") .. ":" .. tostring(winner or "None")
+      if self._lastTestResultKey ~= key then
+        self._lastTestResultKey = key
+        GLD.UI:ShowRollResultPopup({
+          itemLink = itemLink,
+          itemName = (itemLink and GetItemInfo(itemLink)) or nil,
+          winnerName = winner or "None",
+        })
+      end
+    end
   end
   self.resultsScroll:AddChild(winnerLabel)
 

@@ -430,10 +430,27 @@ function UI:ShowRollPopup(session)
       session.votes = session.votes or {}
       local key = NS:GetPlayerKeyFromUnit("player")
       session.votes[key] = btn.vote
-      GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
-        rollID = session.rollID,
-        vote = btn.vote,
-      }, "RAID")
+      if not session.isTest then
+        local authority = GLD:GetAuthorityName()
+        if authority and not GLD:IsAuthority() then
+          GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
+            rollID = session.rollID,
+            vote = btn.vote,
+          }, "WHISPER", authority)
+        else
+          local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
+          GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
+            rollID = session.rollID,
+            vote = btn.vote,
+          }, channel)
+        end
+      else
+        local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
+        GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
+          rollID = session.rollID,
+          vote = btn.vote,
+        }, channel)
+      end
       if session.locked then
         GLD:Print("Result locked. Your vote was recorded but the outcome is final.")
       end
@@ -456,4 +473,53 @@ function UI:ShowRollPopup(session)
   end
 
   self.rollFrame = frame
+end
+
+function UI:ShowRollResultPopup(result)
+  if not AceGUI or not result then
+    return
+  end
+
+  if self.resultFrame then
+    self.resultFrame:Release()
+  end
+
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Loot Result")
+  frame:SetStatusText(result.itemName or "Item")
+  frame:SetWidth(420)
+  frame:SetHeight(180)
+  frame:SetLayout("Flow")
+  frame:EnableResize(false)
+
+  local itemLabel = AceGUI:Create("InteractiveLabel")
+  itemLabel:SetFullWidth(true)
+  itemLabel:SetText(result.itemLink or result.itemName or "Unknown Item")
+  itemLabel:SetCallback("OnEnter", function()
+    local link = result.itemLink
+    if link and link ~= "" then
+      GameTooltip:SetOwner(frame.frame, "ANCHOR_CURSOR")
+      GameTooltip:SetHyperlink(link)
+      GameTooltip:Show()
+    end
+  end)
+  itemLabel:SetCallback("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+  frame:AddChild(itemLabel)
+
+  local winnerLabel = AceGUI:Create("Label")
+  winnerLabel:SetFullWidth(true)
+  winnerLabel:SetText("Winner: " .. tostring(result.winnerName or "None"))
+  frame:AddChild(winnerLabel)
+
+  local closeBtn = AceGUI:Create("Button")
+  closeBtn:SetText("OK")
+  closeBtn:SetWidth(100)
+  closeBtn:SetCallback("OnClick", function()
+    frame:Hide()
+  end)
+  frame:AddChild(closeBtn)
+
+  self.resultFrame = frame
 end
