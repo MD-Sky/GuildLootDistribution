@@ -15,12 +15,77 @@ local TEST_VOTERS = {
   { name = "Vulthan", class = "WARRIOR", armor = "Plate", weapon = "Two-Handed Axe" },
 }
 
+local CLASS_TO_ARMOR = {
+  WARRIOR = "Plate",
+  PALADIN = "Plate",
+  DEATHKNIGHT = "Plate",
+  HUNTER = "Mail",
+  SHAMAN = "Mail",
+  EVOKER = "Mail",
+  ROGUE = "Leather",
+  DRUID = "Leather",
+  MONK = "Leather",
+  DEMONHUNTER = "Leather",
+  PRIEST = "Cloth",
+  MAGE = "Cloth",
+  WARLOCK = "Cloth",
+}
+
+local function BuildDynamicTestVoters()
+  if not IsInGroup() then
+    return nil
+  end
+
+  local voters = {}
+  local function addUnit(unit)
+    if not UnitExists(unit) then
+      return
+    end
+    local name, realm = UnitName(unit)
+    if not name then
+      return
+    end
+    local classFile = select(2, UnitClass(unit))
+    local armor = CLASS_TO_ARMOR[classFile] or "-"
+    local displayName = name
+    if realm and realm ~= "" then
+      displayName = name .. "-" .. realm
+    end
+    voters[#voters + 1] = {
+      name = displayName,
+      class = classFile,
+      armor = armor,
+      weapon = nil,
+    }
+  end
+
+  if IsInRaid() then
+    for i = 1, GetNumGroupMembers() do
+      addUnit("raid" .. i)
+    end
+  else
+    for i = 1, GetNumSubgroupMembers() do
+      addUnit("party" .. i)
+    end
+    addUnit("player")
+  end
+
+  if #voters > 0 then
+    return voters
+  end
+  return nil
+end
+
+local function GetActiveVoters()
+  return TestUI.dynamicVoters or TEST_VOTERS
+end
+
 local function GetTestVoter(index)
-  return TEST_VOTERS[index]
+  return GetActiveVoters()[index]
 end
 
 local function GetTestVoterName(index)
-  local entry = TEST_VOTERS[index]
+  local entry = GetActiveVoters()[index]
   return entry and entry.name or nil
 end
 
@@ -227,6 +292,31 @@ end
 function TestUI:ResetTestVotes()
   self.testVotes = {}
   self.currentVoterIndex = 0
+end
+
+function TestUI:UpdateDynamicTestVoters()
+  local voters = BuildDynamicTestVoters()
+  if not voters then
+    if self.dynamicVoters then
+      self.dynamicVoters = nil
+      self:ResetTestVotes()
+    end
+    return
+  end
+
+  local signature = {}
+  for _, entry in ipairs(voters) do
+    signature[#signature + 1] = entry.name .. ":" .. tostring(entry.class or "")
+  end
+  local newSignature = table.concat(signature, "|")
+
+  if self._dynamicVotersSignature ~= newSignature then
+    self.dynamicVoters = voters
+    self._dynamicVotersSignature = newSignature
+    self:ResetTestVotes()
+  else
+    self.dynamicVoters = voters
+  end
 end
 
 function TestUI:SetSelectedItemLink(itemLink)
@@ -449,6 +539,8 @@ function TestUI:RefreshTestPanel()
     return
   end
 
+  self:UpdateDynamicTestVoters()
+
   local sessionActive = GLD.db.session and GLD.db.session.active
   self.sessionStatus:SetText("Session Status: " .. (sessionActive and "|cff00ff00ACTIVE|r" or "|cffff0000INACTIVE|r"))
 
@@ -536,6 +628,8 @@ function TestUI:RefreshVotePanel()
     return
   end
 
+  self:UpdateDynamicTestVoters()
+
   if self.currentVoterIndex == nil or self.currentVoterIndex < 0 then
     self.currentVoterIndex = 0
   end
@@ -558,7 +652,8 @@ function TestUI:RefreshVotePanel()
   end)
   self.voteScroll:AddChild(resetBtn)
 
-  local currentEntry = GetTestVoter(self.currentVoterIndex + 1)
+  local activeVoters = GetActiveVoters()
+  local currentEntry = activeVoters[self.currentVoterIndex + 1]
   local name = currentEntry and currentEntry.name or nil
   if self.voteGroup then
     self.voteGroup:SetTitle("Test Vote Selection" .. (name and (" - " .. name) or ""))
@@ -619,6 +714,8 @@ function TestUI:RefreshResultsPanel()
     return
   end
 
+  self:UpdateDynamicTestVoters()
+
   self.resultsScroll:ReleaseChildren()
 
   local header = AceGUI:Create("Label")
@@ -628,7 +725,8 @@ function TestUI:RefreshResultsPanel()
 
   local itemLink = NormalizeItemInput(self.itemLinkInput and self.itemLinkInput:GetText() or nil)
   local counts = { NEED = 0, GREED = 0, TRANSMOG = 0, PASS = 0 }
-  for _, entry in ipairs(TEST_VOTERS) do
+  local activeVoters = GetActiveVoters()
+  for _, entry in ipairs(activeVoters) do
     local vote = self.testVotes[entry.name]
     if vote and counts[vote] then
       if vote == "NEED" and itemLink then
@@ -648,7 +746,7 @@ function TestUI:RefreshResultsPanel()
   self.resultsScroll:AddChild(summary)
 
   local allDone = true
-  for _, entry in ipairs(TEST_VOTERS) do
+  for _, entry in ipairs(activeVoters) do
     if not self.testVotes[entry.name] then
       allDone = false
       break
@@ -662,7 +760,7 @@ function TestUI:RefreshResultsPanel()
     local winner = nil
     local lootArmorType = GetArmorTypeOnly(itemLink)
     if lootArmorType == "Cloth" or lootArmorType == "Leather" or lootArmorType == "Mail" or lootArmorType == "Plate" then
-      for _, entry in ipairs(TEST_VOTERS) do
+      for _, entry in ipairs(activeVoters) do
         if entry.armor == lootArmorType and self.testVotes[entry.name] == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) then
           winner = entry.name
           break
@@ -671,7 +769,7 @@ function TestUI:RefreshResultsPanel()
     end
 
     if not winner and counts.NEED > 0 then
-      for _, entry in ipairs(TEST_VOTERS) do
+      for _, entry in ipairs(activeVoters) do
         if self.testVotes[entry.name] == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) then
           winner = entry.name
           break
@@ -680,14 +778,14 @@ function TestUI:RefreshResultsPanel()
     end
 
     if not winner and counts.GREED > 0 then
-      for _, entry in ipairs(TEST_VOTERS) do
+      for _, entry in ipairs(activeVoters) do
         if self.testVotes[entry.name] == "GREED" then
           winner = entry.name
           break
         end
       end
     elseif not winner and counts.TRANSMOG > 0 then
-      for _, entry in ipairs(TEST_VOTERS) do
+      for _, entry in ipairs(activeVoters) do
         if self.testVotes[entry.name] == "TRANSMOG" then
           winner = entry.name
           break
@@ -696,7 +794,7 @@ function TestUI:RefreshResultsPanel()
     end
     local winnerArmor = "-"
     if winner then
-      for _, entry in ipairs(TEST_VOTERS) do
+      for _, entry in ipairs(activeVoters) do
         if entry.name == winner then
           winnerArmor = entry.armor or "-"
           break
@@ -710,7 +808,7 @@ function TestUI:RefreshResultsPanel()
   self.resultsScroll:AddChild(winnerLabel)
 
   local lootType = GetLootTypeText(itemLink)
-  for _, entry in ipairs(TEST_VOTERS) do
+  for _, entry in ipairs(activeVoters) do
     local row = AceGUI:Create("Label")
     row:SetFullWidth(true)
     local vote = self.testVotes[entry.name] or "-"
@@ -1046,7 +1144,8 @@ function TestUI:LoadEncounterLoot(retryCount)
 end
 
 function TestUI:SimulateLootRoll(itemLink)
-  if (self.currentVoterIndex or 0) > (#TEST_VOTERS - 1) then
+  local activeVoters = GetActiveVoters()
+  if (self.currentVoterIndex or 0) > (#activeVoters - 1) then
     GLD:Print("All test voters completed. Use Reset Votes to start again.")
     return
   end
@@ -1121,12 +1220,13 @@ end
 
 function TestUI:AdvanceTestVoter()
   self.currentVoterIndex = (self.currentVoterIndex or 0) + 1
-  if self.currentVoterIndex > (#TEST_VOTERS - 1) then
-    self.currentVoterIndex = #TEST_VOTERS
+  local activeVoters = GetActiveVoters()
+  if self.currentVoterIndex > (#activeVoters - 1) then
+    self.currentVoterIndex = #activeVoters
   end
   self:RefreshVotePanel()
   self:RefreshResultsPanel()
-  if self.currentVoterIndex <= (#TEST_VOTERS - 1) then
+  if self.currentVoterIndex <= (#activeVoters - 1) then
     if self.itemLinkInput then
       self:SimulateLootRoll(self.itemLinkInput:GetText())
     end

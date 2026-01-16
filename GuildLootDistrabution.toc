@@ -11,6 +11,7 @@ Libs\Ace3\LibStub\LibStub.lua
 Libs\Ace3\CallbackHandler-1.0\CallbackHandler-1.0.lua
 Libs\Ace3\AceAddon-3.0\AceAddon-3.0.lua
 Libs\Ace3\AceEvent-3.0\AceEvent-3.0.lua
+Libs\ChatThrottleLib\ChatThrottleLib.lua
 Libs\Ace3\AceComm-3.0\AceComm-3.0.lua
 Libs\Ace3\AceSerializer-3.0\AceSerializer-3.0.lua
 Libs\Ace3\AceGUI-3.0\AceGUI-3.0.xml
