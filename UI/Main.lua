@@ -447,7 +447,7 @@ function UI:ShowRollPopup(session)
         return
       end
       frame:Hide()
-      if NS.TestUI and session.testVoterName then
+      if NS.TestUI and session.testVoterName and not IsInGroup() and not IsInRaid() then
         NS.TestUI.testVotes[session.testVoterName] = btn.vote
         NS.TestUI:AdvanceTestVoter()
       end

@@ -575,7 +575,7 @@ function TestUI:RefreshTestPanel()
 
   self.rosterScroll:ReleaseChildren()
 
-  GLD:Print("RefreshTestPanel: resultsScroll=" .. tostring(self.resultsScroll))
+  GLD:Debug("RefreshTestPanel: resultsScroll=" .. tostring(self.resultsScroll))
 
   local list = BuildTestRosterList()
 
@@ -687,7 +687,7 @@ function TestUI:RefreshVotePanel()
   end
 
   self.voteScroll:ReleaseChildren()
-  GLD:Print("RefreshVotePanel: index=" .. tostring(self.currentVoterIndex))
+  GLD:Debug("RefreshVotePanel: index=" .. tostring(self.currentVoterIndex))
 
   local debugLabel = AceGUI:Create("Label")
   debugLabel:SetFullWidth(true)
@@ -710,7 +710,7 @@ function TestUI:RefreshVotePanel()
   if self.voteGroup then
     self.voteGroup:SetTitle("Test Vote Selection" .. (name and (" - " .. name) or ""))
   end
-  GLD:Print("Test vote current player=" .. tostring(name))
+  GLD:Debug("Test vote current player=" .. tostring(name))
   if not name then
     local doneLabel = AceGUI:Create("Label")
     doneLabel:SetFullWidth(true)
@@ -745,7 +745,7 @@ function TestUI:RefreshVotePanel()
     btn:SetCallback("OnClick", function()
       self.testVotes[name] = vote
       self.currentVoterIndex = self.currentVoterIndex + 1
-      GLD:Print("Test vote: " .. tostring(name) .. " -> " .. tostring(vote) .. " (next index=" .. tostring(self.currentVoterIndex) .. ")")
+      GLD:Debug("Test vote: " .. tostring(name) .. " -> " .. tostring(vote) .. " (next index=" .. tostring(self.currentVoterIndex) .. ")")
       self:RefreshVotePanel()
       self:RefreshResultsPanel()
     end)
@@ -902,7 +902,7 @@ function TestUI:RefreshInstanceList()
   if not EncounterJournal or (not (C_EncounterJournal and C_EncounterJournal.GetNumTiers) and not _G.EJ_GetNumTiers) then
     if not self._ejDebugShown then
       self._ejDebugShown = true
-      GLD:Print("EJ not ready yet (EncounterJournal or EJ_GetNumTiers missing)")
+      GLD:Debug("EJ not ready yet (EncounterJournal or EJ_GetNumTiers missing)")
     end
     C_Timer.After(0.2, function()
       TestUI:RefreshInstanceList()
@@ -919,7 +919,7 @@ function TestUI:RefreshInstanceList()
   if tiers == 0 then
     if not self._ejDebugShown then
       self._ejDebugShown = true
-      GLD:Print("EJ tiers = 0 (no data yet)")
+      GLD:Debug("EJ tiers = 0 (no data yet)")
     end
     C_Timer.After(0.2, function()
       TestUI:RefreshInstanceList()
@@ -944,7 +944,7 @@ function TestUI:RefreshInstanceList()
   if #order == 0 then
     if not self._ejDebugShown then
       self._ejDebugShown = true
-      GLD:Print("EJ instances = 0 (no raids returned)")
+      GLD:Debug("EJ instances = 0 (no raids returned)")
     end
     C_Timer.After(0.2, function()
       TestUI:RefreshInstanceList()
@@ -1014,7 +1014,7 @@ function TestUI:SelectInstance(instanceID)
 
   self.encounterSelect:SetList(encounters, order)
   if #order == 0 then
-    GLD:Print("EJ encounters = 0 for instance " .. tostring(instanceID))
+    GLD:Debug("EJ encounters = 0 for instance " .. tostring(instanceID))
   end
   if order[1] then
     self.encounterSelect:SetValue(order[1])
@@ -1040,19 +1040,19 @@ end
 
 function TestUI:LoadEncounterLoot(retryCount)
   if not self.selectedEncounterIndex or not self.lootScroll then
-    GLD:Print("LoadLoot: missing encounter or lootScroll")
+    GLD:Debug("LoadLoot: missing encounter or lootScroll")
     return
   end
 
   local encounterIndex = self.selectedEncounterIndex
   if type(encounterIndex) ~= "number" then
-    GLD:Print("LoadLoot: invalid encounterIndex " .. tostring(self.selectedEncounterIndex))
+    GLD:Debug("LoadLoot: invalid encounterIndex " .. tostring(self.selectedEncounterIndex))
     return
   end
 
   local encounterID = self.selectedEncounterID
   if type(encounterID) ~= "number" then
-    GLD:Print("LoadLoot: missing encounterID for index " .. tostring(encounterIndex))
+    GLD:Debug("LoadLoot: missing encounterID for index " .. tostring(encounterIndex))
   end
 
   if not EncounterJournal then
@@ -1063,7 +1063,7 @@ function TestUI:LoadEncounterLoot(retryCount)
     end
   end
   if not (C_EncounterJournal and C_EncounterJournal.GetLootInfoByIndex) and not _G.EJ_GetLootInfoByIndex then
-    GLD:Print("LoadLoot: EJ_GetLootInfoByIndex missing")
+    GLD:Debug("LoadLoot: EJ_GetLootInfoByIndex missing")
     return
   end
 
@@ -1091,7 +1091,7 @@ function TestUI:LoadEncounterLoot(retryCount)
     EJ_Call("SelectEncounter", encounterIndex)
   end
 
-  GLD:Print("LoadLoot: encounterIndex=" .. tostring(encounterIndex) .. " encounterID=" .. tostring(encounterID))
+  GLD:Debug("LoadLoot: encounterIndex=" .. tostring(encounterIndex) .. " encounterID=" .. tostring(encounterID))
 
   local function GetLootInfoByIndex(index)
     if C_EncounterJournal and C_EncounterJournal.GetLootInfoByIndex then
@@ -1188,11 +1188,11 @@ function TestUI:LoadEncounterLoot(retryCount)
     index = index + 1
   end
 
-  GLD:Print("LoadLoot: items added=" .. tostring(added))
+  GLD:Debug("LoadLoot: items added=" .. tostring(added))
 
   retryCount = retryCount or 0
   if added == 0 and retryCount < 5 then
-    GLD:Print("LoadLoot: no items yet, retrying " .. tostring(retryCount + 1))
+    GLD:Debug("LoadLoot: no items yet, retrying " .. tostring(retryCount + 1))
     C_Timer.After(0.3, function()
       TestUI:LoadEncounterLoot(retryCount + 1)
     end)
@@ -1251,7 +1251,16 @@ function TestUI:SimulateLootRoll(itemLink)
   GLD.activeRolls[rollID] = session
 
   if GLD.UI then
-    local voter = GetTestVoterName((self.currentVoterIndex or 0) + 1) or "Test Player"
+    local voter = nil
+    if IsInGroup() or IsInRaid() then
+      local name, realm = UnitName("player")
+      if name then
+        voter = realm and realm ~= "" and (name .. "-" .. realm) or name
+      end
+    end
+    if not voter then
+      voter = GetTestVoterName((self.currentVoterIndex or 0) + 1) or "Test Player"
+    end
     session.testVoterName = voter
     GLD.UI:ShowRollPopup(session)
   end

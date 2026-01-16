@@ -32,6 +32,17 @@ function GLD:Print(msg)
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99GuildLoot|r " .. tostring(msg))
 end
 
+function GLD:IsDebugEnabled()
+  return self.db and self.db.config and self.db.config.debugLogs == true
+end
+
+function GLD:Debug(msg)
+  if not self:IsDebugEnabled() then
+    return
+  end
+  DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99GuildLoot|r " .. tostring(msg))
+end
+
 function GLD:IsAdmin()
   if UnitIsGroupLeader("player") or UnitIsGroupAssistant("player") then
     return true

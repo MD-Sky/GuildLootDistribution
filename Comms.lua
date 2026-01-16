@@ -140,10 +140,10 @@ function GLD:HandleStateSnapshot(sender, payload)
   local localRosterHash = self:ComputeRosterHashFromDB()
   local localConfigHash = self:ComputeConfigHash()
   if payload.rosterHash and localRosterHash and payload.rosterHash ~= localRosterHash then
-    self:Print("Sync mismatch: your roster differs from authority. Using authority data.")
+    self:Debug("Sync mismatch: your roster differs from authority. Using authority data.")
   end
   if payload.configHash and localConfigHash and payload.configHash ~= localConfigHash then
-    self:Print("Sync mismatch: your config differs from authority.")
+    self:Debug("Sync mismatch: your config differs from authority.")
   end
   self.shadow.lastSyncAt = GetServerTime()
   if payload.my then
@@ -266,6 +266,13 @@ function GLD:HandleRollSession(sender, payload)
           self:FinalizeRoll(active)
         end
       end)
+    end
+  end
+
+  if isTest then
+    local name, realm = UnitName("player")
+    if name then
+      session.testVoterName = realm and realm ~= "" and (name .. "-" .. realm) or name
     end
   end
 

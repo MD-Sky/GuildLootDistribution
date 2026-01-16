@@ -7,6 +7,7 @@ local DEFAULT_CONFIG = {
   bossDisabled = {},
   transmogWinnerMove = "END",
   greedWinnerMove = "NONE",
+  debugLogs = false,
 }
 
 local function InitMasterDB()
