@@ -95,6 +95,9 @@ Player specifications are automatically detected via:
 
 ## Version History
 
+### v0.2.1
+- Patch release for release workflow and packaging alignment.
+
 ### v0.2.0
 - ✅ Separated test sessions with dedicated database
 - ✅ Test history UI with filtering and session details
