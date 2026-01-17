@@ -1,0 +1,430 @@
+local _, NS = ...
+
+local GLD = NS.GLD
+local UI = NS.UI
+local AceGUI = LibStub("AceGUI-3.0", true)
+
+local function FormatDateTime(ts)
+  if not ts or ts == 0 then
+    return "-"
+  end
+  return date("%Y-%m-%d %H:%M", ts)
+end
+
+local function FormatDuration(startedAt, endedAt)
+  if not startedAt or startedAt == 0 then
+    return "-"
+  end
+  local finish = endedAt and endedAt > 0 and endedAt or GetServerTime()
+  local total = math.max(0, finish - startedAt)
+  local hours = math.floor(total / 3600)
+  local mins = math.floor((total % 3600) / 60)
+  return string.format("%dh %dm", hours, mins)
+end
+
+local function GetUniqueValues(list, field)
+  local values = { ALL = "All" }
+  local seen = {}
+  for _, entry in ipairs(list or {}) do
+    local val = entry[field]
+    if val and val ~= "" and not seen[val] then
+      seen[val] = true
+      values[val] = val
+    end
+  end
+  return values
+end
+
+function UI:ToggleHistory()
+  if not AceGUI then
+    return
+  end
+  if not GLD:IsAdmin() then
+    GLD:Print("you do not have Guild Permission to access this panel")
+    return
+  end
+  if not self.historyFrame then
+    self:CreateHistoryFrame()
+  end
+  if self.historyFrame:IsShown() then
+    self.historyFrame:Hide()
+  else
+    self.historyFrame:Show()
+    self:RefreshHistoryList()
+    self:RefreshHistoryDetails()
+  end
+end
+
+function UI:CreateHistoryFrame()
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Raid Session History")
+  frame:SetStatusText("Browse raid nights, bosses, and loot")
+  frame:SetWidth(900)
+  frame:SetHeight(560)
+  frame:SetLayout("Flow")
+  frame:EnableResize(true)
+
+  local filters = AceGUI:Create("SimpleGroup")
+  filters:SetFullWidth(true)
+  filters:SetLayout("Flow")
+
+  local raidFilter = AceGUI:Create("Dropdown")
+  raidFilter:SetLabel("Raid")
+  raidFilter:SetWidth(200)
+  raidFilter:SetList({ ALL = "All" })
+  raidFilter:SetValue("ALL")
+  filters:AddChild(raidFilter)
+
+  local diffFilter = AceGUI:Create("Dropdown")
+  diffFilter:SetLabel("Difficulty")
+  diffFilter:SetWidth(160)
+  diffFilter:SetList({ ALL = "All" })
+  diffFilter:SetValue("ALL")
+  filters:AddChild(diffFilter)
+
+  local rangeFilter = AceGUI:Create("Dropdown")
+  rangeFilter:SetLabel("Date Range")
+  rangeFilter:SetWidth(140)
+  rangeFilter:SetList({ ALL = "All", D7 = "Last 7 days", D30 = "Last 30 days", D90 = "Last 90 days" })
+  rangeFilter:SetValue("ALL")
+  filters:AddChild(rangeFilter)
+
+  frame:AddChild(filters)
+
+  local columns = AceGUI:Create("SimpleGroup")
+  columns:SetFullWidth(true)
+  columns:SetFullHeight(true)
+  columns:SetLayout("Flow")
+  frame:AddChild(columns)
+
+  local left = AceGUI:Create("InlineGroup")
+  left:SetTitle("Sessions")
+  left:SetWidth(350)
+  left:SetFullHeight(true)
+  left:SetLayout("Fill")
+
+  local leftScroll = AceGUI:Create("ScrollFrame")
+  leftScroll:SetLayout("Flow")
+  left:AddChild(leftScroll)
+  columns:AddChild(left)
+
+  local right = AceGUI:Create("InlineGroup")
+  right:SetTitle("Session Details")
+  right:SetFullWidth(true)
+  right:SetFullHeight(true)
+  right:SetLayout("Fill")
+
+  local rightScroll = AceGUI:Create("ScrollFrame")
+  rightScroll:SetLayout("Flow")
+  right:AddChild(rightScroll)
+  columns:AddChild(right)
+
+  raidFilter:SetCallback("OnValueChanged", function(_, _, value)
+    self.historyRaidFilter = value
+    self:RefreshHistoryList()
+  end)
+
+  diffFilter:SetCallback("OnValueChanged", function(_, _, value)
+    self.historyDiffFilter = value
+    self:RefreshHistoryList()
+  end)
+
+  rangeFilter:SetCallback("OnValueChanged", function(_, _, value)
+    self.historyRangeFilter = value
+    self:RefreshHistoryList()
+  end)
+
+  self.historyFrame = frame
+  self.historyListScroll = leftScroll
+  self.historyDetailScroll = rightScroll
+  self.historyRaidFilter = "ALL"
+  self.historyDiffFilter = "ALL"
+  self.historyRangeFilter = "ALL"
+  self.historyRaidFilterWidget = raidFilter
+  self.historyDiffFilterWidget = diffFilter
+  self.historyRangeFilterWidget = rangeFilter
+end
+
+function UI:RefreshHistoryList()
+  if not self.historyListScroll then
+    return
+  end
+
+  local sessions = GLD.db.raidSessions or {}
+  self.historyListScroll:ReleaseChildren()
+
+  if self.historyRaidFilterWidget then
+    self.historyRaidFilterWidget:SetList(GetUniqueValues(sessions, "raidName"))
+  end
+  if self.historyDiffFilterWidget then
+    self.historyDiffFilterWidget:SetList(GetUniqueValues(sessions, "difficultyName"))
+  end
+
+  local cutoff = nil
+  if self.historyRangeFilter == "D7" then
+    cutoff = GetServerTime() - (7 * 24 * 60 * 60)
+  elseif self.historyRangeFilter == "D30" then
+    cutoff = GetServerTime() - (30 * 24 * 60 * 60)
+  elseif self.historyRangeFilter == "D90" then
+    cutoff = GetServerTime() - (90 * 24 * 60 * 60)
+  end
+
+  local count = 0
+  local firstMatch = nil
+  for _, entry in ipairs(sessions) do
+    local raidOk = self.historyRaidFilter == "ALL" or entry.raidName == self.historyRaidFilter
+    local diffOk = self.historyDiffFilter == "ALL" or entry.difficultyName == self.historyDiffFilter
+    local dateOk = not cutoff or (entry.startedAt or 0) >= cutoff
+    if raidOk and diffOk and dateOk then
+      count = count + 1
+      if not firstMatch then
+        firstMatch = entry.id
+      end
+      local row = AceGUI:Create("SimpleGroup")
+      row:SetFullWidth(true)
+      row:SetLayout("Flow")
+
+      local dateLabel = AceGUI:Create("Label")
+      dateLabel:SetWidth(110)
+      dateLabel:SetText(FormatDateTime(entry.startedAt))
+      row:AddChild(dateLabel)
+
+      local raidLabel = AceGUI:Create("Label")
+      raidLabel:SetWidth(120)
+      raidLabel:SetText(entry.raidName or "Unknown")
+      row:AddChild(raidLabel)
+
+      local diffLabel = AceGUI:Create("Label")
+      diffLabel:SetWidth(80)
+      diffLabel:SetText(entry.difficultyName or "-")
+      row:AddChild(diffLabel)
+
+      local bossCount = AceGUI:Create("Label")
+      bossCount:SetWidth(40)
+      bossCount:SetText(tostring(#(entry.bosses or {})))
+      row:AddChild(bossCount)
+
+      local viewBtn = AceGUI:Create("Button")
+      viewBtn:SetText("View")
+      viewBtn:SetWidth(60)
+      viewBtn:SetCallback("OnClick", function()
+        self.historySelectedId = entry.id
+        self:RefreshHistoryDetails()
+      end)
+      row:AddChild(viewBtn)
+
+      self.historyListScroll:AddChild(row)
+    end
+  end
+
+  if count == 0 then
+    local empty = AceGUI:Create("Label")
+    empty:SetFullWidth(true)
+    empty:SetText("No raid sessions match the current filters.")
+    self.historyListScroll:AddChild(empty)
+  elseif not self.historySelectedId and firstMatch then
+    self.historySelectedId = firstMatch
+    self:RefreshHistoryDetails()
+  end
+end
+
+function UI:RefreshHistoryDetails()
+  if not self.historyDetailScroll then
+    return
+  end
+
+  self.historyDetailScroll:ReleaseChildren()
+
+  local selected = nil
+  for _, entry in ipairs(GLD.db.raidSessions or {}) do
+    if entry.id == self.historySelectedId then
+      selected = entry
+      break
+    end
+  end
+
+  if not selected then
+    local empty = AceGUI:Create("Label")
+    empty:SetFullWidth(true)
+    empty:SetText("Select a session on the left to view details.")
+    self.historyDetailScroll:AddChild(empty)
+    return
+  end
+
+  local header = AceGUI:Create("Heading")
+  header:SetFullWidth(true)
+  header:SetText((selected.raidName or "Unknown") .. " - " .. (selected.difficultyName or "-") )
+  self.historyDetailScroll:AddChild(header)
+
+  local meta = AceGUI:Create("Label")
+  meta:SetFullWidth(true)
+  meta:SetText(string.format("Start: %s | End: %s | Duration: %s",
+    FormatDateTime(selected.startedAt),
+    FormatDateTime(selected.endedAt),
+    FormatDuration(selected.startedAt, selected.endedAt)
+  ))
+  self.historyDetailScroll:AddChild(meta)
+
+  local copyBtn = AceGUI:Create("Button")
+  copyBtn:SetText("Copy Summary")
+  copyBtn:SetWidth(140)
+  copyBtn:SetCallback("OnClick", function()
+    self:ShowHistorySummaryPopup(selected)
+  end)
+  self.historyDetailScroll:AddChild(copyBtn)
+
+  local bosses = selected.bosses or {}
+  if #bosses == 0 then
+    local none = AceGUI:Create("Label")
+    none:SetFullWidth(true)
+    none:SetText("No boss kills logged for this session.")
+    self.historyDetailScroll:AddChild(none)
+  end
+
+  for _, boss in ipairs(bosses) do
+    local bossHeader = AceGUI:Create("Heading")
+    bossHeader:SetFullWidth(true)
+    bossHeader:SetText((boss.encounterName or "Boss") .. " - " .. FormatDateTime(boss.killedAt))
+    self.historyDetailScroll:AddChild(bossHeader)
+
+    local loot = boss.loot or {}
+    if #loot == 0 then
+      local none = AceGUI:Create("Label")
+      none:SetFullWidth(true)
+      none:SetText("No loot recorded for this boss.")
+      self.historyDetailScroll:AddChild(none)
+    else
+      for _, item in ipairs(loot) do
+        local row = AceGUI:Create("SimpleGroup")
+        row:SetFullWidth(true)
+        row:SetLayout("Flow")
+
+        local icon = "Interface\\Icons\\INV_Misc_QuestionMark"
+        if item.itemLink then
+          local itemIcon = select(10, GetItemInfo(item.itemLink))
+          if itemIcon then
+            icon = itemIcon
+          else
+            GLD:RequestItemData(item.itemLink)
+          end
+        end
+
+        local iconWidget = AceGUI:Create("Icon")
+        iconWidget:SetImage(icon)
+        iconWidget:SetImageSize(20, 20)
+        iconWidget:SetWidth(24)
+        iconWidget:SetHeight(24)
+        iconWidget:SetCallback("OnEnter", function()
+          local link = item.itemLink
+          if link and link ~= "" then
+            GameTooltip:SetOwner(iconWidget.frame, "ANCHOR_CURSOR")
+            GameTooltip:SetHyperlink(link)
+            GameTooltip:Show()
+          end
+        end)
+        iconWidget:SetCallback("OnLeave", function()
+          GameTooltip:Hide()
+        end)
+        row:AddChild(iconWidget)
+
+        local itemLabel = AceGUI:Create("InteractiveLabel")
+        itemLabel:SetWidth(240)
+        itemLabel:SetText(item.itemLink or item.itemName or "Unknown Item")
+        itemLabel:SetCallback("OnEnter", function()
+          local link = item.itemLink
+          if link and link ~= "" then
+            GameTooltip:SetOwner(itemLabel.frame, "ANCHOR_CURSOR")
+            GameTooltip:SetHyperlink(link)
+            GameTooltip:Show()
+          end
+        end)
+        itemLabel:SetCallback("OnLeave", function()
+          GameTooltip:Hide()
+        end)
+        row:AddChild(itemLabel)
+
+        local winnerLabel = AceGUI:Create("Label")
+        winnerLabel:SetWidth(160)
+        winnerLabel:SetText("Winner: " .. tostring(item.winnerName or "None"))
+        row:AddChild(winnerLabel)
+
+        self.historyDetailScroll:AddChild(row)
+      end
+    end
+  end
+
+  local looseLoot = {}
+  for _, item in ipairs(selected.loot or {}) do
+    local assigned = false
+    for _, boss in ipairs(bosses) do
+      for _, bossItem in ipairs(boss.loot or {}) do
+        if bossItem.rollID == item.rollID then
+          assigned = true
+          break
+        end
+      end
+      if assigned then
+        break
+      end
+    end
+    if not assigned then
+      looseLoot[#looseLoot + 1] = item
+    end
+  end
+
+  if #looseLoot > 0 then
+    local looseHeader = AceGUI:Create("Heading")
+    looseHeader:SetFullWidth(true)
+    looseHeader:SetText("Session Loot (unassigned)")
+    self.historyDetailScroll:AddChild(looseHeader)
+
+    for _, item in ipairs(looseLoot) do
+      local row = AceGUI:Create("Label")
+      row:SetFullWidth(true)
+      row:SetText(string.format("%s -> %s", item.itemLink or item.itemName or "Unknown Item", item.winnerName or "None"))
+      self.historyDetailScroll:AddChild(row)
+    end
+  end
+end
+
+function UI:ShowHistorySummaryPopup(session)
+  if not AceGUI or not session then
+    return
+  end
+
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Session Summary")
+  frame:SetStatusText(session.raidName or "Raid")
+  frame:SetWidth(520)
+  frame:SetHeight(360)
+  frame:SetLayout("Fill")
+  frame:EnableResize(true)
+
+  local box = AceGUI:Create("MultiLineEditBox")
+  box:SetLabel("Copy this summary")
+  box:SetFullWidth(true)
+  box:SetFullHeight(true)
+  box:DisableButton(true)
+
+  local lines = {}
+  lines[#lines + 1] = string.format("Raid: %s (%s)", session.raidName or "Unknown", session.difficultyName or "-")
+  lines[#lines + 1] = string.format("Start: %s", FormatDateTime(session.startedAt))
+  lines[#lines + 1] = string.format("End: %s", FormatDateTime(session.endedAt))
+  lines[#lines + 1] = string.format("Duration: %s", FormatDuration(session.startedAt, session.endedAt))
+  lines[#lines + 1] = ""
+
+  local hasBosses = #((session.bosses) or {}) > 0
+  for _, boss in ipairs(session.bosses or {}) do
+    lines[#lines + 1] = string.format("Boss: %s (%s)", boss.encounterName or "Boss", FormatDateTime(boss.killedAt))
+    for _, item in ipairs(boss.loot or {}) do
+      lines[#lines + 1] = string.format("  - %s -> %s", item.itemName or item.itemLink or "Unknown Item", item.winnerName or "None")
+    end
+  end
+
+  if not hasBosses then
+    lines[#lines + 1] = "No boss kills or loot recorded."
+  end
+
+  box:SetText(table.concat(lines, "\n"))
+  frame:AddChild(box)
+end

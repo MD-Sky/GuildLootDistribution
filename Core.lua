@@ -1,7 +1,7 @@
 local ADDON_NAME, NS = ...
 
 NS.ADDON_NAME = ADDON_NAME
-NS.VERSION = "0.1.0"
+NS.VERSION = "0.2.0"
 NS.COMM_PREFIX = "GLD1"
 NS.MSG = {
   STATE_SNAPSHOT = "STATE_SNAPSHOT",
@@ -74,6 +74,9 @@ function GLD:OnInitialize()
   self:InitMinimapButton()
   self:InitAttendance()
   self:InitLoot()
+  if self.InitSpec then
+    self:InitSpec()
+  end
   self:RegisterSlashCommands()
 end
 
@@ -83,6 +86,9 @@ function GLD:OnEnable()
   self:RegisterEvent("PLAYER_ROLES_ASSIGNED", "OnGroupRosterUpdate")
   self:RegisterEvent("PLAYER_GUILD_UPDATE", "OnGroupRosterUpdate")
   self:RegisterEvent("ADDON_LOADED", "OnAddonLoaded")
+  self:RegisterEvent("ENCOUNTER_END", "OnEncounterEnd")
+  self:RegisterEvent("INSPECT_READY", "OnInspectReady")
+  self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED", "OnPlayerSpecChanged")
   if self.TryCreateGuildUIButton then
     self:TryCreateGuildUIButton()
   end

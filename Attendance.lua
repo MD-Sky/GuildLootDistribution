@@ -8,8 +8,45 @@ function GLD:InitAttendance()
       active = false,
       startedAt = 0,
       attended = {},
+      raidSessionId = nil,
+      currentBoss = nil,
     }
   end
+end
+
+function GLD:GetActiveRaidSession()
+  local sessionId = self.db.session and self.db.session.raidSessionId
+  if not sessionId then
+    return nil
+  end
+  for _, entry in ipairs(self.db.raidSessions or {}) do
+    if entry.id == sessionId then
+      return entry
+    end
+  end
+  return nil
+end
+
+function GLD:StartRaidSession()
+  local instanceName, instanceType, difficultyID, difficultyName, _, _, _, instanceID = GetInstanceInfo()
+  local id = tostring(GetServerTime()) .. "-" .. tostring(math.random(1000, 9999))
+  local entry = {
+    id = id,
+    startedAt = GetServerTime(),
+    endedAt = nil,
+    raidName = instanceName or "Unknown",
+    instanceType = instanceType or "unknown",
+    difficultyID = difficultyID,
+    difficultyName = difficultyName,
+    instanceID = instanceID,
+    bosses = {},
+    loot = {},
+  }
+  self.db.raidSessions = self.db.raidSessions or {}
+  table.insert(self.db.raidSessions, 1, entry)
+  self.db.session.raidSessionId = id
+  self.db.session.currentBoss = nil
+  return entry
 end
 
 function GLD:StartSession()
@@ -19,6 +56,7 @@ function GLD:StartSession()
   self.db.session.active = true
   self.db.session.startedAt = GetServerTime()
   self.db.session.attended = {}
+  self:StartRaidSession()
   self:AutoMarkCurrentGroup()
   self:EnsureQueuePositions()
   self:BroadcastSnapshot()
@@ -30,8 +68,39 @@ function GLD:EndSession()
     return
   end
   self.db.session.active = false
+  local raidSession = self:GetActiveRaidSession()
+  if raidSession then
+    raidSession.endedAt = GetServerTime()
+  end
+  self.db.session.raidSessionId = nil
+  self.db.session.currentBoss = nil
   self:BroadcastSnapshot()
   self:Print("Session ended")
+end
+
+function GLD:OnEncounterEnd(_, encounterID, encounterName, difficultyID, groupSize, success)
+  if not self.db.session.active or success ~= 1 then
+    return
+  end
+  local raidSession = self:GetActiveRaidSession()
+  if not raidSession then
+    return
+  end
+  local killedAt = GetServerTime()
+  local bossEntry = {
+    encounterID = encounterID,
+    encounterName = encounterName,
+    difficultyID = difficultyID,
+    groupSize = groupSize,
+    killedAt = killedAt,
+    loot = {},
+  }
+  table.insert(raidSession.bosses, bossEntry)
+  self.db.session.currentBoss = {
+    encounterID = encounterID,
+    encounterName = encounterName,
+    killedAt = killedAt,
+  }
 end
 
 function GLD:AutoMarkCurrentGroup()
@@ -96,9 +165,18 @@ end
 
 function GLD:OnGroupRosterUpdate()
   if not self.db.session.active then
+    if self.QueueGroupSpecSync then
+      self:QueueGroupSpecSync()
+    end
+    if self.UI then
+      self.UI:RefreshMain()
+    end
     return
   end
   self:AutoMarkCurrentGroup()
+  if self.QueueGroupSpecSync then
+    self:QueueGroupSpecSync()
+  end
   self:BroadcastSnapshot()
   if self.UI then
     self.UI:RefreshMain()

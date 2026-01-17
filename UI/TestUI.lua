@@ -15,6 +15,7 @@ local TEST_VOTERS = {
   { name = "Vulthan", class = "WARRIOR", armor = "Plate", weapon = "Two-Handed Axe" },
 }
 
+local CLASS_DATA = NS.CLASS_DATA or {}
 local CLASS_TO_ARMOR = {
   WARRIOR = "Plate",
   PALADIN = "Plate",
@@ -31,6 +32,14 @@ local CLASS_TO_ARMOR = {
   WARLOCK = "Cloth",
 }
 
+local function GetArmorForClass(classFile)
+  local data = CLASS_DATA and CLASS_DATA[classFile]
+  if data and data.armor then
+    return data.armor
+  end
+  return CLASS_TO_ARMOR[classFile] or "-"
+end
+
 local function BuildDynamicTestVoters()
   if not IsInGroup() then
     return nil
@@ -46,7 +55,7 @@ local function BuildDynamicTestVoters()
       return
     end
     local classFile = select(2, UnitClass(unit))
-    local armor = CLASS_TO_ARMOR[classFile] or "-"
+    local armor = GetArmorForClass(classFile)
     local displayName = name
     if realm and realm ~= "" then
       displayName = name .. "-" .. realm
@@ -80,30 +89,71 @@ local function GetActiveVoters()
   return TestUI.dynamicVoters or TEST_VOTERS
 end
 
+local function GetTestPlayerKey(name, realm)
+  if not name or name == "" then
+    return nil
+  end
+  local useRealm = realm and realm ~= "" and realm or GetRealmName()
+  return name .. "-" .. useRealm
+end
+
+local function GetOrCreateTestPlayer(name, realm, class)
+  local key = GetTestPlayerKey(name, realm)
+  if not key then
+    return nil, nil
+  end
+  TestUI.testPlayers = TestUI.testPlayers or {}
+  local player = TestUI.testPlayers[key]
+  if not player then
+    player = {
+      name = name,
+      realm = realm or GetRealmName(),
+      class = class,
+      attendance = "PRESENT",
+      numAccepted = 0,
+      attendanceCount = 0,
+      queuePos = nil,
+      savedPos = 0,
+    }
+    TestUI.testPlayers[key] = player
+  end
+  return player, key
+end
+
 local function BuildTestRosterList()
   local list = {}
   if TestUI.dynamicVoters and #TestUI.dynamicVoters > 0 then
     for _, voter in ipairs(TestUI.dynamicVoters) do
       local name, realm = NS:SplitNameRealm(voter.name)
-      local key = GLD:FindPlayerKeyByName(name, realm)
-      if key and GLD.db.players[key] then
-        list[#list + 1] = GLD.db.players[key]
-      else
-        list[#list + 1] = {
-          name = name,
-          realm = realm or GetRealmName(),
-          class = voter.class,
-          attendance = "PRESENT",
-          numAccepted = 0,
-          attendanceCount = 0,
-          _isGuest = true,
-        }
+      local player = GetOrCreateTestPlayer(name, realm, voter.class)
+      if player then
+        list[#list + 1] = player
       end
     end
     return list
   end
 
-  for _, player in pairs(GLD.db.players) do
+  TestUI.testPlayers = TestUI.testPlayers or {}
+  if next(TestUI.testPlayers) == nil then
+    for _, player in pairs(GLD.db.players) do
+      local copy = {
+        name = player.name,
+        realm = player.realm or GetRealmName(),
+        class = player.class,
+        attendance = player.attendance,
+        queuePos = player.queuePos,
+        savedPos = player.savedPos,
+        numAccepted = player.numAccepted or 0,
+        attendanceCount = player.attendanceCount or 0,
+      }
+      local key = GetTestPlayerKey(copy.name, copy.realm)
+      if key then
+        TestUI.testPlayers[key] = copy
+      end
+    end
+  end
+
+  for _, player in pairs(TestUI.testPlayers) do
     list[#list + 1] = player
   end
   return list
@@ -116,6 +166,24 @@ end
 local function GetTestVoterName(index)
   local entry = GetActiveVoters()[index]
   return entry and entry.name or nil
+end
+
+local function FormatDateTime(ts)
+  if not ts or ts == 0 then
+    return "-"
+  end
+  return date("%Y-%m-%d %H:%M", ts)
+end
+
+local function FormatDuration(startedAt, endedAt)
+  if not startedAt or startedAt == 0 then
+    return "-"
+  end
+  local finish = endedAt and endedAt > 0 and endedAt or GetServerTime()
+  local total = math.max(0, finish - startedAt)
+  local hours = math.floor(total / 3600)
+  local mins = math.floor((total % 3600) / 60)
+  return string.format("%dh %dm", hours, mins)
 end
 
 local function NormalizeItemInput(itemLink)
@@ -258,40 +326,85 @@ local function IsPreferredItemForEntry(entry, itemLink)
   end
   local _, _, _, _, _, itemType, itemSubType = GetItemInfo(itemLink)
   if itemType == "Weapon" then
-    if not entry.weapon or not itemSubType then
+    if not itemSubType then
       return false
     end
-    local pref = string.lower(entry.weapon)
+
+    local function matchPreference(pref, sub)
+      if not pref or pref == "" then
+        return false
+      end
+      if pref:find("bow") and sub:find("bow") then
+        return true
+      end
+      if pref:find("gun") and sub:find("gun") then
+        return true
+      end
+      if pref:find("crossbow") and sub:find("crossbow") then
+        return true
+      end
+      if pref:find("staff") and sub:find("staff") then
+        return true
+      end
+      if pref:find("polearm") and sub:find("polearm") then
+        return true
+      end
+      if pref:find("sword") and sub:find("sword") then
+        return true
+      end
+      if pref:find("axe") and sub:find("axe") then
+        return true
+      end
+      if pref:find("mace") and sub:find("mace") then
+        return true
+      end
+      if pref:find("dagger") and sub:find("dagger") then
+        return true
+      end
+      if pref:find("fist") and sub:find("fist") then
+        return true
+      end
+      if pref:find("warglaive") and (sub:find("warglaive") or sub:find("glaive")) then
+        return true
+      end
+      if pref:find("wand") and sub:find("wand") then
+        return true
+      end
+      if pref:find("shield") and sub:find("shield") then
+        return true
+      end
+      if pref:find("two%-handed") and sub:find("two") then
+        return true
+      end
+      if pref:find("one%-handed") and sub:find("one") then
+        return true
+      end
+      return false
+    end
+
     local sub = string.lower(itemSubType)
-    if pref:find("bow") and sub:find("bow") then
-      return true
-    end
-    if pref:find("gun") and sub:find("gun") then
-      return true
-    end
-    if pref:find("crossbow") and sub:find("crossbow") then
-      return true
-    end
-    if pref:find("staff") and sub:find("staff") then
-      return true
-    end
-    if pref:find("polearm") and sub:find("polearm") then
-      return true
-    end
-    if pref:find("sword") and sub:find("sword") then
-      return true
-    end
-    if pref:find("axe") and sub:find("axe") then
-      return true
-    end
-    if pref:find("mace") and sub:find("mace") then
-      return true
-    end
-    if pref:find("dagger") and sub:find("dagger") then
-      return true
-    end
-    if pref:find("fist") and sub:find("fist") then
-      return true
+    if entry.weapon then
+      local pref = string.lower(entry.weapon)
+      if matchPreference(pref, sub) then
+        return true
+      end
+    elseif entry.class and CLASS_DATA and CLASS_DATA[entry.class] then
+      local classInfo = CLASS_DATA[entry.class]
+      local prefs = nil
+      if entry.spec and classInfo.specs and classInfo.specs[entry.spec] then
+        prefs = classInfo.specs[entry.spec].preferredWeapons
+      else
+        prefs = classInfo.weapons
+      end
+      if prefs then
+        for _, pref in ipairs(prefs) do
+          if matchPreference(string.lower(pref), sub) then
+            return true
+          end
+        end
+      end
+    else
+      return false
     end
   end
   return false
@@ -338,6 +451,48 @@ function GLD:InitTestUI()
   TestUI.currentVoterIndex = 0
   TestUI.disableManualVotes = true
   TestUI.queueEditEnabled = false
+  TestUI.testSessionActive = GLD.db.testSession and GLD.db.testSession.active or false
+  TestUI.testHistoryFrame = nil
+  TestUI.testGraphsFrame = nil
+  TestUI.testGraphsDebug = false
+  TestUI.testPlayers = TestUI.testPlayers or {}
+end
+
+function TestUI:StartTestSession()
+  if self.testSessionActive then
+    return
+  end
+  local id = tostring(GetServerTime()) .. "-" .. tostring(math.random(1000, 9999))
+  local entry = {
+    id = id,
+    startedAt = GetServerTime(),
+    endedAt = nil,
+    raidName = self.selectedInstanceName or "Test Raid",
+    loot = {},
+    bosses = {},
+  }
+  GLD.db.testSessions = GLD.db.testSessions or {}
+  table.insert(GLD.db.testSessions, 1, entry)
+  GLD.db.testSession.active = true
+  GLD.db.testSession.currentId = id
+  self.testSessionActive = true
+end
+
+function TestUI:EndTestSession()
+  if not self.testSessionActive then
+    return
+  end
+  if GLD.db.testSession and GLD.db.testSession.currentId then
+    for _, entry in ipairs(GLD.db.testSessions or {}) do
+      if entry.id == GLD.db.testSession.currentId then
+        entry.endedAt = GetServerTime()
+        break
+      end
+    end
+  end
+  GLD.db.testSession.active = false
+  GLD.db.testSession.currentId = nil
+  self.testSessionActive = false
 end
 
 function TestUI:ResetTestVotes()
@@ -476,7 +631,7 @@ function TestUI:CreateTestFrame()
   startBtn:SetText("Start Session")
   startBtn:SetWidth(150)
   startBtn:SetCallback("OnClick", function()
-    GLD:StartSession()
+    TestUI:StartTestSession()
     TestUI:RefreshTestPanel()
   end)
   sessionGroup:AddChild(startBtn)
@@ -485,10 +640,26 @@ function TestUI:CreateTestFrame()
   endBtn:SetText("End Session")
   endBtn:SetWidth(150)
   endBtn:SetCallback("OnClick", function()
-    GLD:EndSession()
+    TestUI:EndTestSession()
     TestUI:RefreshTestPanel()
   end)
   sessionGroup:AddChild(endBtn)
+
+  local historyBtn = AceGUI:Create("Button")
+  historyBtn:SetText("Test History")
+  historyBtn:SetWidth(150)
+  historyBtn:SetCallback("OnClick", function()
+    TestUI:ToggleTestHistory()
+  end)
+  sessionGroup:AddChild(historyBtn)
+
+  local graphsBtn = AceGUI:Create("Button")
+  graphsBtn:SetText("Experimental Graphs")
+  graphsBtn:SetWidth(150)
+  graphsBtn:SetCallback("OnClick", function()
+    TestUI:ToggleTestGraphs()
+  end)
+  sessionGroup:AddChild(graphsBtn)
 
   local queueEditBtn = AceGUI:Create("Button")
   queueEditBtn:SetWidth(150)
@@ -707,14 +878,35 @@ function TestUI:RefreshTestPanel()
 
   self:UpdateDynamicTestVoters()
 
-  local sessionActive = GLD.db.session and GLD.db.session.active
-  self.sessionStatus:SetText("Session Status: " .. (sessionActive and "|cff00ff00ACTIVE|r" or "|cffff0000INACTIVE|r"))
+  if GLD.db.testSession then
+    self.testSessionActive = GLD.db.testSession.active == true
+  end
+
+  local sessionActive = self.testSessionActive == true
+    self.sessionStatus:SetText("Session Status: " .. (sessionActive and "|cff00ff00ACTIVE|r" or "|cffff0000INACTIVE|r"))
 
   self.rosterScroll:ReleaseChildren()
 
   GLD:Debug("RefreshTestPanel: resultsScroll=" .. tostring(self.resultsScroll))
 
-  local list = BuildTestRosterList()
+  local rawList = BuildTestRosterList()
+  local list = {}
+  if rawList then
+    for _, entry in ipairs(rawList) do
+      local name = entry.name
+      local realm = entry.realm
+      local key = nil
+      if name then
+        key = GLD:FindPlayerKeyByName(name, realm)
+      end
+      local dbPlayer = key and GLD.db.players and GLD.db.players[key] or nil
+      if dbPlayer then
+        list[#list + 1] = dbPlayer
+      else
+        list[#list + 1] = entry
+      end
+    end
+  end
 
   table.sort(list, function(a, b)
     if a.attendance == "PRESENT" and b.attendance ~= "PRESENT" then
@@ -750,7 +942,8 @@ function TestUI:RefreshTestPanel()
     if player._isGuest then
       displayName = displayName .. " (Party)"
     end
-    nameLabel:SetText(ColorizeClassName(displayName, player.class))
+      local classText = ColorizeClassName(displayName, player.class)
+      nameLabel:SetText(string.format("%s | %s", player.specName or "-", classText))
     nameLabel:SetWidth(160)
     row:AddChild(nameLabel)
 
@@ -762,7 +955,7 @@ function TestUI:RefreshTestPanel()
     local toggleBtn = AceGUI:Create("Button")
     toggleBtn:SetText(player.attendance == "PRESENT" and "Mark Absent" or "Mark Present")
     toggleBtn:SetWidth(120)
-    local playerKey = player.name .. "-" .. (player.realm or GetRealmName())
+    local playerKey = GetTestPlayerKey(player.name, player.realm)
     if player._isGuest then
       toggleBtn:SetText("Party Member")
       if toggleBtn.SetDisabled then
@@ -770,9 +963,9 @@ function TestUI:RefreshTestPanel()
       end
     else
       toggleBtn:SetCallback("OnClick", function()
-        if GLD.db.players[playerKey] then
-          local newState = GLD.db.players[playerKey].attendance == "PRESENT" and "ABSENT" or "PRESENT"
-          GLD:SetAttendance(playerKey, newState)
+        if TestUI.testPlayers and TestUI.testPlayers[playerKey] then
+          local newState = TestUI.testPlayers[playerKey].attendance == "PRESENT" and "ABSENT" or "PRESENT"
+          TestUI.testPlayers[playerKey].attendance = newState
           TestUI:RefreshTestPanel()
         end
       end)
@@ -786,9 +979,8 @@ function TestUI:RefreshTestPanel()
       queueBox:SetWidth(60)
       queueBox:SetCallback("OnEnterPressed", function(_, _, value)
         local pos = tonumber(value)
-        if GLD.db.players[playerKey] then
-          GLD:RemoveFromQueue(playerKey)
-          GLD:InsertToQueue(playerKey, pos)
+        if TestUI.testPlayers and TestUI.testPlayers[playerKey] then
+          TestUI.testPlayers[playerKey].queuePos = pos
           TestUI:RefreshTestPanel()
         end
       end)
@@ -816,8 +1008,11 @@ function TestUI:RefreshTestPanel()
     else
       wonBox:SetCallback("OnEnterPressed", function(_, _, value)
         local num = tonumber(value) or 0
-        if GLD.db.players[playerKey] then
-          GLD.db.players[playerKey].numAccepted = num
+        if TestUI.testPlayers and TestUI.testPlayers[playerKey] then
+          TestUI.testPlayers[playerKey].numAccepted = num
+          if TestUI.testGraphsFrame and TestUI.testGraphsFrame:IsShown() then
+            TestUI:RefreshTestGraphs()
+          end
         end
       end)
     end
@@ -834,8 +1029,11 @@ function TestUI:RefreshTestPanel()
     else
       raidsBox:SetCallback("OnEnterPressed", function(_, _, value)
         local num = tonumber(value) or 0
-        if GLD.db.players[playerKey] then
-          GLD.db.players[playerKey].attendanceCount = num
+        if TestUI.testPlayers and TestUI.testPlayers[playerKey] then
+          TestUI.testPlayers[playerKey].attendanceCount = num
+          if TestUI.testGraphsFrame and TestUI.testGraphsFrame:IsShown() then
+            TestUI:RefreshTestGraphs()
+          end
         end
       end)
     end
@@ -1237,6 +1435,18 @@ function TestUI:SelectInstance(instanceID)
     return
   end
   self.selectedInstance = instanceID
+  local instName = nil
+  if C_EncounterJournal and C_EncounterJournal.GetInstanceInfo then
+    local info = C_EncounterJournal.GetInstanceInfo(instanceID)
+    if type(info) == "table" then
+      instName = info.name
+    else
+      instName = info
+    end
+  elseif _G.EJ_GetInstanceInfo then
+    instName = _G.EJ_GetInstanceInfo(instanceID)
+  end
+  self.selectedInstanceName = instName
   EJ_Call("SelectInstance", instanceID)
 
   local encounters = {}
@@ -1306,6 +1516,18 @@ function TestUI:SelectEncounter(encounterID)
       end
     end
   end
+  local encounterName = nil
+  if self.selectedInstance and type(encounterID) == "number" then
+    local a, b, c = EJ_Call("GetEncounterInfoByIndex", encounterID, self.selectedInstance)
+    if type(a) == "string" then
+      encounterName = a
+    elseif type(b) == "string" then
+      encounterName = b
+    elseif type(c) == "string" then
+      encounterName = c
+    end
+  end
+  self.selectedEncounterName = encounterName
 end
 
 function TestUI:LoadEncounterLoot(retryCount)
@@ -1476,6 +1698,12 @@ function TestUI:LoadEncounterLoot(retryCount)
 end
 
 function TestUI:SimulateLootRoll(itemLink)
+  if GLD.CleanupOldTestRolls then
+    GLD:CleanupOldTestRolls()
+  end
+  if not self.testSessionActive then
+    self:StartTestSession()
+  end
   local activeVoters = GetActiveVoters()
   if (self.currentVoterIndex or 0) > (#activeVoters - 1) then
     GLD:Print("All test voters completed. Use Reset Votes to start again.")
@@ -1522,7 +1750,11 @@ function TestUI:SimulateLootRoll(itemLink)
     canTransmog = true,
     votes = {},
     expectedVoters = GLD:BuildExpectedVoters(),
+    createdAt = GetServerTime(),
     isTest = true,
+    testEncounterId = self.selectedEncounterID,
+    testEncounterName = self.selectedEncounterName,
+    testRaidName = self.selectedInstanceName,
   }
 
   GLD.activeRolls[rollID] = session
@@ -1581,4 +1813,544 @@ function TestUI:AdvanceTestVoter()
       self:SimulateLootRoll(self.itemLinkInput2:GetText())
     end
   end
+end
+
+function TestUI:ToggleTestHistory()
+  if not AceGUI then
+    return
+  end
+  if not GLD:IsAdmin() then
+    GLD:Print("you do not have Guild Permission to access this panel")
+    return
+  end
+  if not self.testHistoryFrame then
+    self:CreateTestHistoryFrame()
+    self.testHistoryFrame:Show()
+    self:RefreshTestHistoryList()
+    self:RefreshTestHistoryDetails()
+    if self.testHistoryTree then
+      if self.testHistoryTree.RefreshTree then
+        self.testHistoryTree:RefreshTree()
+      end
+      if self.testHistoryTree.DoLayout then
+        self.testHistoryTree:DoLayout()
+      end
+    end
+    if self.testHistoryFrame and self.testHistoryFrame.DoLayout then
+      self.testHistoryFrame:DoLayout()
+    end
+    return
+  end
+  if self.testHistoryFrame:IsShown() then
+    self.testHistoryFrame:Hide()
+  else
+    self.testHistoryFrame:Show()
+    self:RefreshTestHistoryList()
+    self:RefreshTestHistoryDetails()
+    if self.testHistoryTree then
+      if self.testHistoryTree.RefreshTree then
+        self.testHistoryTree:RefreshTree()
+      end
+      if self.testHistoryTree.DoLayout then
+        self.testHistoryTree:DoLayout()
+      end
+    end
+    if self.testHistoryFrame and self.testHistoryFrame.DoLayout then
+      self.testHistoryFrame:DoLayout()
+    end
+  end
+end
+
+function TestUI:ToggleTestGraphs()
+  if not AceGUI then
+    return
+  end
+  if not GLD:IsAdmin() then
+    GLD:Print("you do not have Guild Permission to access this panel")
+    return
+  end
+  if not self.testGraphsFrame then
+    self:CreateTestGraphsFrame()
+    self.testGraphsFrame:Show()
+    self:RefreshTestGraphs()
+    return
+  end
+  if self.testGraphsFrame:IsShown() then
+    self.testGraphsFrame:Hide()
+  else
+    self.testGraphsFrame:Show()
+    self:RefreshTestGraphs()
+  end
+end
+
+function TestUI:CreateTestGraphsFrame()
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Experimental Graphs (Test Data)")
+  frame:SetStatusText("Items won and attendance from test panel data")
+  frame:SetWidth(700)
+  frame:SetHeight(520)
+  frame:SetLayout("Flow")
+  frame:EnableResize(true)
+
+  local refreshBtn = AceGUI:Create("Button")
+  refreshBtn:SetText("Refresh")
+  refreshBtn:SetWidth(120)
+  refreshBtn:SetCallback("OnClick", function()
+    self:RefreshTestGraphs()
+  end)
+  frame:AddChild(refreshBtn)
+
+  local debugToggle = AceGUI:Create("CheckBox")
+  debugToggle:SetLabel("Debug Mode")
+  debugToggle:SetWidth(140)
+  debugToggle:SetValue(self.testGraphsDebug == true)
+  debugToggle:SetCallback("OnValueChanged", function(_, _, value)
+    self.testGraphsDebug = value and true or false
+    self:RefreshTestGraphs()
+  end)
+  frame:AddChild(debugToggle)
+
+  local scroll = AceGUI:Create("ScrollFrame")
+  scroll:SetLayout("Flow")
+  scroll:SetFullWidth(true)
+  scroll:SetFullHeight(true)
+  frame:AddChild(scroll)
+
+  self.testGraphsFrame = frame
+  self.testGraphsScroll = scroll
+end
+
+function TestUI:RefreshTestGraphs()
+  if not self.testGraphsScroll then
+    return
+  end
+  if self._testGraphBars then
+    for _, bar in ipairs(self._testGraphBars) do
+      bar:Hide()
+      bar:SetParent(nil)
+    end
+  end
+  self._testGraphBars = {}
+  self.testGraphsScroll:ReleaseChildren()
+
+  local list = BuildTestRosterList()
+  if not list or #list == 0 then
+    local empty = AceGUI:Create("Label")
+    empty:SetFullWidth(true)
+    empty:SetText("No test data available.")
+    self.testGraphsScroll:AddChild(empty)
+    return
+  end
+
+  if self.testGraphsDebug then
+    local debugHeader = AceGUI:Create("Heading")
+    debugHeader:SetFullWidth(true)
+    debugHeader:SetText("Debug: Graph data source")
+    self.testGraphsScroll:AddChild(debugHeader)
+
+    for _, entry in ipairs(list) do
+      local name = entry.name or "?"
+      local realm = entry.realm or GetRealmName()
+      local key = name .. "-" .. realm
+      local wins = tonumber(entry.numAccepted or 0) or 0
+      local attend = tonumber(entry.attendanceCount or 0) or 0
+      local dbKey = GLD:FindPlayerKeyByName(name, realm)
+      local fromDb = dbKey and GLD.db.players and GLD.db.players[dbKey] and "DB" or "Local"
+      local debugLine = AceGUI:Create("Label")
+      debugLine:SetFullWidth(true)
+      debugLine:SetText(string.format("%s (%s) | wins=%s | raids=%s | source=%s", name, key, wins, attend, fromDb))
+      self.testGraphsScroll:AddChild(debugLine)
+    end
+  end
+
+  local maxWins = 0
+  for _, entry in ipairs(list) do
+    local wins = tonumber(entry.numAccepted or 0) or 0
+    if wins > maxWins then
+      maxWins = wins
+    end
+  end
+  if maxWins == 0 then
+    maxWins = 1
+  end
+
+  local header = AceGUI:Create("Label")
+  header:SetFullWidth(true)
+  header:SetText("Player | Items Won")
+  self.testGraphsScroll:AddChild(header)
+
+  local function createWinsBar(parentFrame, width, height, value, maxValue, classFile)
+    if not parentFrame then
+      return
+    end
+    local bar = parentFrame._gldBar
+    if bar and bar:GetParent() ~= parentFrame then
+      bar = nil
+      parentFrame._gldBar = nil
+      parentFrame._gldBarText = nil
+    end
+    if not bar then
+      bar = CreateFrame("StatusBar", nil, parentFrame)
+      bar:SetPoint("LEFT", parentFrame, "LEFT", 0, 0)
+      bar:SetPoint("TOP", parentFrame, "TOP", 0, 0)
+      bar:SetStatusBarTexture("Interface\\TARGETINGFRAME\\UI-StatusBar")
+      if classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile] then
+        local c = RAID_CLASS_COLORS[classFile]
+        bar:SetStatusBarColor(c.r, c.g, c.b, 0.9)
+      else
+        bar:SetStatusBarColor(0.2, 0.6, 1, 0.9)
+      end
+
+      local bg = bar:CreateTexture(nil, "BACKGROUND")
+      bg:SetAllPoints(bar)
+      bg:SetColorTexture(0.1, 0.1, 0.1, 0.6)
+
+      local text = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      text:SetPoint("CENTER", bar, "CENTER", 0, 0)
+      parentFrame._gldBarText = text
+      parentFrame._gldBar = bar
+    end
+
+    bar:SetSize(width, height)
+    bar:SetMinMaxValues(0, maxValue)
+    bar:SetValue(value)
+    if parentFrame._gldBarText then
+      parentFrame._gldBarText:SetText(tostring(value))
+    end
+  end
+
+  for _, entry in ipairs(list) do
+    local row = AceGUI:Create("SimpleGroup")
+    row:SetFullWidth(true)
+    row:SetHeight(18)
+    row:SetLayout("Flow")
+
+    local nameLabel = AceGUI:Create("Label")
+    nameLabel:SetWidth(160)
+    nameLabel:SetText(ColorizeClassName(entry.name or "?", entry.class))
+    row:AddChild(nameLabel)
+
+    local wins = tonumber(entry.numAccepted or 0) or 0
+    local barGroup = AceGUI:Create("SimpleGroup")
+    barGroup:SetWidth(280)
+    barGroup:SetHeight(16)
+    barGroup:SetLayout("Fill")
+    row:AddChild(barGroup)
+
+    if barGroup.frame then
+      if barGroup.frame._gldBar then
+        barGroup.frame._gldBar:Hide()
+        barGroup.frame._gldBar:SetParent(nil)
+        barGroup.frame._gldBar = nil
+        barGroup.frame._gldBarText = nil
+      end
+      barGroup.frame:SetWidth(280)
+      barGroup.frame:SetHeight(16)
+      createWinsBar(barGroup.frame, 270, 14, wins, maxWins, entry.class)
+      if barGroup.frame._gldBar then
+        table.insert(self._testGraphBars, barGroup.frame._gldBar)
+      end
+    end
+
+    self.testGraphsScroll:AddChild(row)
+  end
+end
+
+function TestUI:CreateTestHistoryFrame()
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Test Session History")
+  frame:SetStatusText("Admin test loot history")
+  frame:SetWidth(900)
+  frame:SetHeight(560)
+  frame:SetLayout("Flow")
+  frame:EnableResize(true)
+
+  local tree = AceGUI:Create("TreeGroup")
+  tree:SetFullWidth(true)
+  tree:SetFullHeight(true)
+  tree:SetLayout("Fill")
+  if tree.EnableTreeResizing then
+    tree:EnableTreeResizing(false)
+  end
+  if tree.SetTreeWidth then
+    tree:SetTreeWidth(380, false)
+  end
+  if tree.EnableButtonTooltips then
+    tree:EnableButtonTooltips(false)
+  end
+  tree:SetCallback("OnGroupSelected", function(_, _, value)
+    self.testHistorySelectedId = value
+    self:RefreshTestHistoryDetails()
+  end)
+  frame:AddChild(tree)
+
+  self.testHistoryFrame = frame
+  self.testHistoryTree = tree
+  self.testHistoryDetailScroll = nil
+  self.testHistorySelectedId = nil
+end
+
+function TestUI:RefreshTestHistoryList()
+  if not self.testHistoryTree then
+    return
+  end
+
+  local sessions = GLD.db.testSessions or {}
+  local treeData = {}
+  if #sessions == 0 then
+    self.testHistoryTree:SetTree(treeData)
+    self.testHistorySelectedId = nil
+    self:RefreshTestHistoryDetails()
+    return
+  end
+
+  local firstId = nil
+  local maxLabelWidth = 0
+  for _, entry in ipairs(sessions) do
+    if not firstId then
+      firstId = entry.id
+    end
+    local label = string.format("%s - %s - %s", FormatDateTime(entry.startedAt), entry.raidName or "Test Raid", FormatDuration(entry.startedAt, entry.endedAt))
+    treeData[#treeData + 1] = { value = entry.id, text = label }
+    if self.testHistoryTree and self.testHistoryTree.frame then
+      if not self._testHistoryMeasure then
+        local fs = self.testHistoryTree.frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        fs:SetText("")
+        self._testHistoryMeasure = fs
+      end
+      if self._testHistoryMeasure then
+        self._testHistoryMeasure:SetText(label)
+        local w = self._testHistoryMeasure:GetStringWidth() or 0
+        if w > maxLabelWidth then
+          maxLabelWidth = w
+        end
+      end
+    end
+  end
+
+  self.testHistoryTree:SetTree(treeData)
+  if self.testHistoryTree.SetTreeWidth and maxLabelWidth > 0 then
+    local padding = 60
+    local width = math.floor(maxLabelWidth + padding)
+    width = math.max(220, math.min(520, width))
+    self.testHistoryTree:SetTreeWidth(width, false)
+  end
+  if not self.testHistorySelectedId and firstId then
+    self.testHistorySelectedId = firstId
+    self.testHistoryTree:Select(firstId)
+  end
+end
+
+function TestUI:RefreshTestHistoryDetails()
+  if not self.testHistoryTree then
+    return
+  end
+  self.testHistoryTree:ReleaseChildren()
+
+  local detailScroll = AceGUI:Create("ScrollFrame")
+  detailScroll:SetLayout("Flow")
+  detailScroll:SetFullWidth(true)
+  detailScroll:SetFullHeight(true)
+  self.testHistoryTree:AddChild(detailScroll)
+  self.testHistoryDetailScroll = detailScroll
+
+  local selected = nil
+  for _, entry in ipairs(GLD.db.testSessions or {}) do
+    if entry.id == self.testHistorySelectedId then
+      selected = entry
+      break
+    end
+  end
+
+  if not selected then
+    local empty = AceGUI:Create("Label")
+    empty:SetFullWidth(true)
+    empty:SetText("Select a test session to view details.")
+    detailScroll:AddChild(empty)
+    return
+  end
+
+  local header = AceGUI:Create("Heading")
+  header:SetFullWidth(true)
+  header:SetText("Test Session - " .. (selected.raidName or "Test Raid"))
+  detailScroll:AddChild(header)
+
+  local meta = AceGUI:Create("Label")
+  meta:SetFullWidth(true)
+  meta:SetText(string.format("Start: %s | End: %s | Duration: %s",
+    FormatDateTime(selected.startedAt),
+    FormatDateTime(selected.endedAt),
+    FormatDuration(selected.startedAt, selected.endedAt)
+  ))
+  detailScroll:AddChild(meta)
+
+  local copyBtn = AceGUI:Create("Button")
+  copyBtn:SetText("Copy Summary")
+  copyBtn:SetWidth(140)
+  copyBtn:SetCallback("OnClick", function()
+    self:ShowTestHistorySummaryPopup(selected)
+  end)
+  detailScroll:AddChild(copyBtn)
+
+  local function addLootRow(item)
+    local winnerName = item.winnerName or "None"
+    local shortName = winnerName
+    local classFile = nil
+    if NS and NS.SplitNameRealm and winnerName ~= "None" then
+      local nameOnly = NS:SplitNameRealm(winnerName)
+      if nameOnly and nameOnly ~= "" then
+        shortName = nameOnly
+      end
+    end
+    if item.winnerKey and GLD.db.players and GLD.db.players[item.winnerKey] then
+      classFile = GLD.db.players[item.winnerKey].class
+    elseif shortName and GLD.FindPlayerKeyByName then
+      local key = GLD:FindPlayerKeyByName(shortName)
+      if key and GLD.db.players and GLD.db.players[key] then
+        classFile = GLD.db.players[key].class
+      end
+    end
+    if classFile then
+      shortName = ColorizeClassName(shortName, classFile)
+    end
+
+    local row = AceGUI:Create("SimpleGroup")
+    row:SetFullWidth(true)
+    row:SetLayout("Flow")
+
+    local icon = "Interface\\Icons\\INV_Misc_QuestionMark"
+    if item.itemLink then
+      local itemIcon = select(10, GetItemInfo(item.itemLink))
+      if itemIcon then
+        icon = itemIcon
+      else
+        GLD:RequestItemData(item.itemLink)
+      end
+    end
+
+    local iconWidget = AceGUI:Create("Icon")
+    iconWidget:SetImage(icon)
+    iconWidget:SetImageSize(20, 20)
+    iconWidget:SetWidth(24)
+    iconWidget:SetHeight(24)
+    iconWidget:SetCallback("OnEnter", function()
+      local link = item.itemLink
+      if link and link ~= "" then
+        GameTooltip:SetOwner(iconWidget.frame, "ANCHOR_CURSOR")
+        GameTooltip:SetHyperlink(link)
+        GameTooltip:Show()
+      end
+    end)
+    iconWidget:SetCallback("OnLeave", function()
+      GameTooltip:Hide()
+    end)
+    row:AddChild(iconWidget)
+
+    local itemLabel = AceGUI:Create("InteractiveLabel")
+    itemLabel:SetWidth(240)
+    itemLabel:SetText(item.itemLink or item.itemName or "Unknown Item")
+    itemLabel:SetCallback("OnEnter", function()
+      local link = item.itemLink
+      if link and link ~= "" then
+        GameTooltip:SetOwner(itemLabel.frame, "ANCHOR_CURSOR")
+        GameTooltip:SetHyperlink(link)
+        GameTooltip:Show()
+      end
+    end)
+    itemLabel:SetCallback("OnLeave", function()
+      GameTooltip:Hide()
+    end)
+    row:AddChild(itemLabel)
+
+    local winnerLabel = AceGUI:Create("Label")
+    winnerLabel:SetWidth(160)
+    winnerLabel:SetText("Winner: " .. tostring(shortName or "None"))
+    row:AddChild(winnerLabel)
+
+    self.testHistoryDetailScroll:AddChild(row)
+  end
+
+  local bosses = selected.bosses or {}
+  if #bosses == 0 then
+    local loot = selected.loot or {}
+    if #loot == 0 then
+      local none = AceGUI:Create("Label")
+      none:SetFullWidth(true)
+      none:SetText("No loot recorded for this test session.")
+      detailScroll:AddChild(none)
+      return
+    end
+    for _, item in ipairs(loot) do
+      addLootRow(item)
+    end
+    return
+  end
+
+  for _, boss in ipairs(bosses) do
+    local bossHeader = AceGUI:Create("Heading")
+    bossHeader:SetFullWidth(true)
+    bossHeader:SetText((boss.encounterName or "Encounter") .. " - " .. FormatDateTime(boss.killedAt))
+    detailScroll:AddChild(bossHeader)
+
+    local loot = boss.loot or {}
+    if #loot == 0 then
+      local none = AceGUI:Create("Label")
+      none:SetFullWidth(true)
+      none:SetText("No loot recorded for this encounter.")
+      detailScroll:AddChild(none)
+    else
+      for _, item in ipairs(loot) do
+        addLootRow(item)
+      end
+    end
+  end
+end
+
+function TestUI:ShowTestHistorySummaryPopup(session)
+  if not AceGUI or not session then
+    return
+  end
+
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Test Session Summary")
+  frame:SetStatusText("Test")
+  frame:SetWidth(520)
+  frame:SetHeight(360)
+  frame:SetLayout("Fill")
+  frame:EnableResize(true)
+
+  local box = AceGUI:Create("MultiLineEditBox")
+  box:SetLabel("Copy this summary")
+  box:SetFullWidth(true)
+  box:SetFullHeight(true)
+  box:DisableButton(true)
+
+  local lines = {}
+  lines[#lines + 1] = "Test Session"
+  lines[#lines + 1] = string.format("Raid: %s", session.raidName or "Test Raid")
+  lines[#lines + 1] = string.format("Start: %s", FormatDateTime(session.startedAt))
+  lines[#lines + 1] = string.format("End: %s", FormatDateTime(session.endedAt))
+  lines[#lines + 1] = string.format("Duration: %s", FormatDuration(session.startedAt, session.endedAt))
+  lines[#lines + 1] = ""
+
+  local bosses = session.bosses or {}
+  if #bosses > 0 then
+    for _, boss in ipairs(bosses) do
+      lines[#lines + 1] = string.format("Encounter: %s", boss.encounterName or "Encounter")
+      for _, item in ipairs(boss.loot or {}) do
+        lines[#lines + 1] = string.format("  - %s -> %s", item.itemName or item.itemLink or "Unknown Item", item.winnerName or "None")
+      end
+    end
+  else
+    for _, item in ipairs(session.loot or {}) do
+      lines[#lines + 1] = string.format("- %s -> %s", item.itemName or item.itemLink or "Unknown Item", item.winnerName or "None")
+    end
+  end
+
+  if #lines <= 5 then
+    lines[#lines + 1] = "No loot recorded."
+  end
+
+  box:SetText(table.concat(lines, "\n"))
+  frame:AddChild(box)
 end

@@ -14,6 +14,9 @@ function GLD:InitUI()
   UI.mainFrame = nil
   UI.rollFrame = nil
   UI.rollFrames = nil
+  UI.adminVoteFrame = nil
+  UI.historyFrame = nil
+  UI.historySelectedId = nil
 end
 
 function UI:ToggleMain()
@@ -100,6 +103,18 @@ function UI:CreateMainFrame()
     end
   end)
   frame:AddChild(adminButton)
+
+  local historyBtn = AceGUI:Create("Button")
+  historyBtn:SetText("Raid History")
+  historyBtn:SetWidth(120)
+  historyBtn:SetCallback("OnClick", function()
+    if GLD:IsAdmin() then
+      UI:ToggleHistory()
+    else
+      GLD:Print("you do not have Guild Permission to access this panel")
+    end
+  end)
+  frame:AddChild(historyBtn)
 
   local refreshGuildBtn = AceGUI:Create("Button")
   refreshGuildBtn:SetText("Refresh Guild Members")
@@ -449,6 +464,10 @@ function UI:RefreshPendingVotes()
     return
   end
 
+  if GLD.CleanupOldTestRolls then
+    GLD:CleanupOldTestRolls()
+  end
+
   self.pendingScroll:ReleaseChildren()
 
   local guidToInfo = {}
@@ -560,6 +579,8 @@ function UI:RefreshPendingVotes()
     local votes = session.votes or {}
     local pending = {}
     local pendingTargets = {}
+    local pendingKeys = {}
+    local pendingLabels = {}
     for _, key in ipairs(expected) do
       if not votes[key] then
         local name, classFile, full = getNameAndClass(key)
@@ -567,6 +588,8 @@ function UI:RefreshPendingVotes()
         if full and full ~= "" then
           pendingTargets[#pendingTargets + 1] = full
         end
+        pendingKeys[#pendingKeys + 1] = key
+        pendingLabels[#pendingLabels + 1] = full or name or tostring(key)
       end
     end
 
@@ -660,8 +683,88 @@ function UI:RefreshPendingVotes()
       row:AddChild(reopenBtn)
     end
 
+    if GLD:IsAuthority() and #pendingKeys > 0 then
+      local adminVoteBtn = AceGUI:Create("Button")
+      adminVoteBtn:SetText("Admin Vote")
+      adminVoteBtn:SetWidth(90)
+      adminVoteBtn:SetCallback("OnClick", function()
+        self:ShowAdminVotePopup(session, pendingKeys, pendingLabels)
+      end)
+      row:AddChild(adminVoteBtn)
+    end
+
     self.pendingScroll:AddChild(row)
   end
+end
+
+function UI:ShowAdminVotePopup(session, pendingKeys, pendingLabels)
+  if not AceGUI or not session then
+    return
+  end
+  if not GLD:IsAuthority() then
+    GLD:Print("Only the authority can apply admin votes.")
+    return
+  end
+
+  if self.adminVoteFrame then
+    self.adminVoteFrame:Release()
+    self.adminVoteFrame = nil
+  end
+
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Admin Vote Override")
+  frame:SetStatusText(session.itemName or "Item")
+  frame:SetWidth(360)
+  frame:SetHeight(220)
+  frame:SetLayout("Flow")
+  frame:EnableResize(false)
+
+  local dropdown = AceGUI:Create("Dropdown")
+  dropdown:SetLabel("Select Player")
+  dropdown:SetFullWidth(true)
+  local values = {}
+  for i, key in ipairs(pendingKeys or {}) do
+    local label = pendingLabels and pendingLabels[i] or tostring(key)
+    values[key] = label
+  end
+  dropdown:SetList(values)
+  if pendingKeys and pendingKeys[1] then
+    dropdown:SetValue(pendingKeys[1])
+  end
+  frame:AddChild(dropdown)
+
+  local function sendVote(vote)
+    local key = dropdown:GetValue()
+    if not key then
+      GLD:Print("Select a player first.")
+      return
+    end
+    GLD:HandleRollVote(UnitName("player") or "", {
+      rollID = session.rollID,
+      vote = vote,
+      voterKey = key,
+    })
+    frame:Release()
+  end
+
+  local buttons = {
+    { label = "Need", vote = "NEED" },
+    { label = "Greed", vote = "GREED" },
+    { label = "Transmog", vote = "TRANSMOG" },
+    { label = "Pass", vote = "PASS" },
+  }
+
+  for _, btn in ipairs(buttons) do
+    local b = AceGUI:Create("Button")
+    b:SetText(btn.label)
+    b:SetWidth(80)
+    b:SetCallback("OnClick", function()
+      sendVote(btn.vote)
+    end)
+    frame:AddChild(b)
+  end
+
+  self.adminVoteFrame = frame
 end
 
 function UI:GetRosterEntries(isAdmin)
@@ -698,6 +801,8 @@ function UI:GetRosterEntries(isAdmin)
       table.insert(entries, {
         name = player.name,
         class = player.class,
+        specName = player.specName,
+        specId = player.specId,
         role = NS:GetRoleForPlayer(player.name),
         queuePos = player.queuePos,
         savedPos = player.savedPos,
@@ -728,6 +833,8 @@ function UI:GetRosterEntries(isAdmin)
       table.insert(entries, {
         name = entry.name,
         class = entry.class,
+        specName = entry.specName,
+        specId = entry.specId,
         role = entry.role or "NONE",
         queuePos = entry.queuePos,
         attendance = entry.attendance,
@@ -748,6 +855,11 @@ function UI:AddHeaderRow(isAdmin, container)
   classHeader:SetText("Class")
   classHeader:SetWidth(60)
   row:AddChild(classHeader)
+
+  local specHeader = AceGUI:Create("Label")
+  specHeader:SetText("Spec")
+  specHeader:SetWidth(70)
+  row:AddChild(specHeader)
 
   local roleHeader = AceGUI:Create("Label")
   roleHeader:SetText("Role")
@@ -805,6 +917,11 @@ function UI:AddRosterRow(entry, isAdmin)
   classLabel:SetText(NS:GetClassIcon(entry.class))
   classLabel:SetWidth(60)
   row:AddChild(classLabel)
+
+  local specLabel = AceGUI:Create("Label")
+  specLabel:SetText(entry.specName or "-")
+  specLabel:SetWidth(70)
+  row:AddChild(specLabel)
 
   local roleLabel = AceGUI:Create("Label")
   roleLabel:SetText(NS:GetRoleIcon(entry.role))
@@ -977,6 +1094,10 @@ function UI:ShowRollPopup(session)
       session.votes[key] = btn.vote
       if self.RefreshPendingVotes then
         self:RefreshPendingVotes()
+      end
+
+      if session.isTest and GLD.CheckRollCompletion then
+        GLD:CheckRollCompletion(session)
       end
 
       if not session.isTest then

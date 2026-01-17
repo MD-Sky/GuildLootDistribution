@@ -110,6 +110,8 @@ function GLD:UpsertPlayerFromUnit(unit)
       name = name,
       realm = realm or GetRealmName(),
       class = classFile,
+      specId = nil,
+      specName = nil,
       attendance = "ABSENT",
       queuePos = nil,
       savedPos = nil,

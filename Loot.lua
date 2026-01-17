@@ -7,6 +7,34 @@ function GLD:InitLoot()
   self:RegisterEvent("START_LOOT_ROLL", "OnStartLootRoll")
 end
 
+function GLD:CleanupOldTestRolls(maxAgeSeconds)
+  if not self.activeRolls then
+    return
+  end
+  local now = GetServerTime()
+  local cutoff = now - (maxAgeSeconds or 1800)
+  for rollID, session in pairs(self.activeRolls) do
+    if session and session.isTest then
+      local createdAt = session.createdAt or 0
+      if session.locked or createdAt == 0 or createdAt < cutoff then
+        self.activeRolls[rollID] = nil
+      end
+    end
+  end
+end
+
+function GLD:GetActiveTestSession()
+  if not self.db or not self.db.testSession or not self.db.testSession.currentId then
+    return nil
+  end
+  for _, entry in ipairs(self.db.testSessions or {}) do
+    if entry.id == self.db.testSession.currentId then
+      return entry
+    end
+  end
+  return nil
+end
+
 local function RollTypeToVote(rollType)
   if rollType == LOOT_ROLL_TYPE_NEED then
     return "NEED"
@@ -177,6 +205,11 @@ function GLD:FinalizeRoll(session)
   session.result = result
 
   self:RecordRollHistory(result)
+  if session.isTest then
+    self:RecordTestSessionLoot(result, session)
+  else
+    self:RecordSessionLoot(result, session)
+  end
   if self:IsAuthority() then
     self:AnnounceRollResult(result)
     if winnerKey then
@@ -185,6 +218,89 @@ function GLD:FinalizeRoll(session)
     end
     local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
     self:SendCommMessageSafe(NS.MSG.ROLL_RESULT, result, channel)
+  end
+end
+
+function GLD:RecordTestSessionLoot(result, session)
+  if not result or not self.db or not self.db.testSession or not self.db.testSession.active then
+    return
+  end
+  local testSession = self:GetActiveTestSession()
+  if not testSession then
+    return
+  end
+
+  local lootEntry = {
+    rollID = result.rollID,
+    itemLink = result.itemLink,
+    itemName = result.itemName,
+    winnerKey = result.winnerKey,
+    winnerName = result.winnerName,
+    resolvedAt = result.resolvedAt or GetServerTime(),
+  }
+
+  testSession.loot = testSession.loot or {}
+  table.insert(testSession.loot, 1, lootEntry)
+
+  local encounterId = session and session.testEncounterId or nil
+  local encounterName = session and session.testEncounterName or nil
+  if encounterId or encounterName then
+    testSession.bosses = testSession.bosses or {}
+    local bossEntry = nil
+    for _, boss in ipairs(testSession.bosses) do
+      if encounterId and boss.encounterId == encounterId then
+        bossEntry = boss
+        break
+      end
+      if not encounterId and encounterName and boss.encounterName == encounterName then
+        bossEntry = boss
+        break
+      end
+    end
+    if not bossEntry then
+      bossEntry = {
+        encounterId = encounterId,
+        encounterName = encounterName or "Encounter",
+        killedAt = GetServerTime(),
+        loot = {},
+      }
+      table.insert(testSession.bosses, bossEntry)
+    end
+    bossEntry.loot = bossEntry.loot or {}
+    table.insert(bossEntry.loot, 1, lootEntry)
+  end
+end
+
+function GLD:RecordSessionLoot(result, session)
+  if not result or not self.db.session or not self.db.session.active then
+    return
+  end
+  local raidSession = self.GetActiveRaidSession and self:GetActiveRaidSession() or nil
+  if not raidSession then
+    return
+  end
+
+  local lootEntry = {
+    rollID = result.rollID,
+    itemLink = result.itemLink,
+    itemName = result.itemName,
+    winnerKey = result.winnerKey,
+    winnerName = result.winnerName,
+    resolvedAt = result.resolvedAt or GetServerTime(),
+  }
+
+  raidSession.loot = raidSession.loot or {}
+  table.insert(raidSession.loot, 1, lootEntry)
+
+  local bossCtx = self.db.session.currentBoss
+  if bossCtx and bossCtx.encounterID and bossCtx.killedAt then
+    for _, boss in ipairs(raidSession.bosses or {}) do
+      if boss.encounterID == bossCtx.encounterID and boss.killedAt == bossCtx.killedAt then
+        boss.loot = boss.loot or {}
+        table.insert(boss.loot, 1, lootEntry)
+        break
+      end
+    end
   end
 end
 

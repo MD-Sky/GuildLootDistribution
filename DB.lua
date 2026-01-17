@@ -27,10 +27,18 @@ local function InitMasterDB()
   GuildLootDB.players = GuildLootDB.players or {}
   GuildLootDB.queue = GuildLootDB.queue or {}
   GuildLootDB.rollHistory = GuildLootDB.rollHistory or {}
+  GuildLootDB.raidSessions = GuildLootDB.raidSessions or {}
+  GuildLootDB.testSessions = GuildLootDB.testSessions or {}
+  GuildLootDB.testSession = GuildLootDB.testSession or {
+    active = false,
+    currentId = nil,
+  }
   GuildLootDB.session = GuildLootDB.session or {
     active = false,
     startedAt = 0,
     attended = {},
+    raidSessionId = nil,
+    currentBoss = nil,
   }
 end
 
