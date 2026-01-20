@@ -51,7 +51,20 @@
         "UIDropDownMenu_CreateInfo",
         "UnitPopup_OpenMenu",
         "UIDROPDOWNMENU_MENU_LEVEL",
-        "UnitPopupMenus"
+        "UnitPopupMenus",
+        "SearchBoxTemplate_OnEditFocusGained",
+        "SearchBoxTemplate_OnEditFocusLost",
+        "SearchBoxTemplate_OnTextChanged",
+        "ScrollUtil",
+        "CreateScrollBoxListLinearView",
+        "CreateDataProvider",
+        "SetSmallGuildTabardTextures",
+        "SetLargeGuildTabardTextures",
+        "SetGuildTabardTextures",
+        "PanelTemplates_SelectTab",
+        "PanelTemplates_DeselectTab",
+        "PanelTemplates_TabResize",
+        "ITEM_SET_NAME"
     ],
     "Lua.type.weakUnionCheck": true,
     "Lua.diagnostics.disable": [

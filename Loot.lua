@@ -1,10 +1,19 @@
 local _, NS = ...
 
 local GLD = NS.GLD
+local LootEngine = NS.LootEngine
+local LiveProvider = NS.LiveProvider
+local TestProvider = NS.TestProvider
 
 function GLD:InitLoot()
   self.activeRolls = {}
   self:RegisterEvent("START_LOOT_ROLL", "OnStartLootRoll")
+  if C_Timer and C_Timer.NewTicker then
+    -- Periodic cleanup to keep test roll data from growing in long sessions.
+    self.cleanupTicker = C_Timer.NewTicker(300, function()
+      self:CleanupOldTestRolls(1800)
+    end)
+  end
 end
 
 function GLD:CleanupOldTestRolls(maxAgeSeconds)
@@ -24,11 +33,11 @@ function GLD:CleanupOldTestRolls(maxAgeSeconds)
 end
 
 function GLD:GetActiveTestSession()
-  if not self.db or not self.db.testSession or not self.db.testSession.currentId then
+  if not self.testDb or not self.testDb.testSession or not self.testDb.testSession.currentId then
     return nil
   end
-  for _, entry in ipairs(self.db.testSessions or {}) do
-    if entry.id == self.db.testSession.currentId then
+  for _, entry in ipairs(self.testDb.testSessions or {}) do
+    if entry.id == self.testDb.testSession.currentId then
       return entry
     end
   end
@@ -131,46 +140,9 @@ function GLD:ResolveRollWinner(session)
   if not session or session.locked then
     return nil
   end
-  local votes = session.votes or {}
-  local priority = { "NEED", "GREED", "TRANSMOG" }
-
-  local function queuePosFor(key)
-    local player = self.db.players and self.db.players[key] or nil
-    if player and player.queuePos then
-      return player.queuePos
-    end
-    return 99999
-  end
-
-  local function nameFor(key)
-    local player = self.db.players and self.db.players[key] or nil
-    if player and player.name then
-      if player.realm and player.realm ~= "" then
-        return player.name .. "-" .. player.realm
-      end
-      return player.name
-    end
-    return key
-  end
-
-  for _, voteType in ipairs(priority) do
-    local winnerKey = nil
-    local bestPos = nil
-    local bestName = nil
-    for key, vote in pairs(votes) do
-      if vote == voteType then
-        local pos = queuePosFor(key)
-        local nm = nameFor(key) or ""
-        if not winnerKey or pos < bestPos or (pos == bestPos and nm < (bestName or "~")) then
-          winnerKey = key
-          bestPos = pos
-          bestName = nm
-        end
-      end
-    end
-    if winnerKey then
-      return winnerKey
-    end
+  if LootEngine and LootEngine.ResolveWinner then
+    local provider = session.isTest and TestProvider or LiveProvider
+    return LootEngine:ResolveWinner(session.votes or {}, provider, session.rules)
   end
   return nil
 end
@@ -180,15 +152,16 @@ function GLD:FinalizeRoll(session)
     return
   end
   local winnerKey = self:ResolveRollWinner(session)
-  local winnerPlayer = winnerKey and self.db.players and self.db.players[winnerKey] or nil
+  local provider = session.isTest and TestProvider or LiveProvider
+  if LootEngine and LootEngine.CommitAward then
+    LootEngine:CommitAward(winnerKey, session, provider)
+  end
+
+  local winnerPlayer = winnerKey and provider and provider.GetPlayer and provider:GetPlayer(winnerKey) or nil
   local winnerName = winnerPlayer and winnerPlayer.name or (winnerKey or "None")
   local winnerFull = winnerName
   if winnerPlayer and winnerPlayer.realm and winnerPlayer.realm ~= "" then
     winnerFull = winnerPlayer.name .. "-" .. winnerPlayer.realm
-  end
-  if winnerPlayer then
-    winnerPlayer.numAccepted = (winnerPlayer.numAccepted or 0) + 1
-    winnerPlayer.lastWinAt = GetServerTime()
   end
 
   local result = {
@@ -204,13 +177,21 @@ function GLD:FinalizeRoll(session)
   session.locked = true
   session.result = result
 
-  self:RecordRollHistory(result)
+  if not session.isTest then
+    self:RecordRollHistory(result)
+  end
   if session.isTest then
     self:RecordTestSessionLoot(result, session)
   else
     self:RecordSessionLoot(result, session)
   end
-  if self:IsAuthority() then
+  if session.isTest and winnerKey and self.MoveTestPlayerToQueueBottom then
+    self:MoveTestPlayerToQueueBottom(winnerKey)
+    if NS.TestUI and NS.TestUI.RefreshTestPanel then
+      NS.TestUI:RefreshTestPanel()
+    end
+  end
+  if self:IsAuthority() and not session.isTest then
     self:AnnounceRollResult(result)
     if winnerKey then
       self:MoveToQueueBottom(winnerKey)
@@ -219,10 +200,13 @@ function GLD:FinalizeRoll(session)
     local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
     self:SendCommMessageSafe(NS.MSG.ROLL_RESULT, result, channel)
   end
+  if self.UI and self.UI.RefreshLootWindow then
+    self.UI:RefreshLootWindow()
+  end
 end
 
 function GLD:RecordTestSessionLoot(result, session)
-  if not result or not self.db or not self.db.testSession or not self.db.testSession.active then
+  if not result or not self.testDb or not self.testDb.testSession or not self.testDb.testSession.active then
     return
   end
   local testSession = self:GetActiveTestSession()
@@ -369,8 +353,8 @@ function GLD:OnStartLootRoll(rollID, rollTime, lootHandle)
 
   if self.UI then
     self.UI:ShowRollPopup(session)
-    if self.UI.ShowPendingFrame then
-      self.UI:ShowPendingFrame()
+    if self.UI.RefreshLootWindow then
+      self.UI:RefreshLootWindow({ forceShow = true })
     end
   end
 
@@ -410,15 +394,35 @@ function GLD:OnLootHistoryRollChanged()
   if not C_LootHistory or not C_LootHistory.GetItem then
     return
   end
+  if not self.activeRolls then
+    return
+  end
   local numItems = C_LootHistory.GetNumItems and C_LootHistory.GetNumItems() or 0
   if numItems <= 0 then
+    return
+  end
+  -- Index active rolls by item link to avoid scanning all rolls per loot history item.
+  local sessionsByLink = nil
+  for _, session in pairs(self.activeRolls) do
+    if session and session.itemLink and session.votes then
+      sessionsByLink = sessionsByLink or {}
+      local list = sessionsByLink[session.itemLink]
+      if not list then
+        list = {}
+        sessionsByLink[session.itemLink] = list
+      end
+      list[#list + 1] = session
+    end
+  end
+  if not sessionsByLink then
     return
   end
   for itemIndex = 1, numItems do
     local lootID, itemLink, itemQuality, itemGUID, numPlayers = C_LootHistory.GetItem(itemIndex)
     if itemLink and numPlayers and numPlayers > 0 then
-      for rollID, session in pairs(self.activeRolls) do
-        if session and session.itemLink == itemLink and session.votes then
+      local sessions = sessionsByLink[itemLink]
+      if sessions then
+        for _, session in ipairs(sessions) do
           for playerIndex = 1, numPlayers do
             local name, class, rollType = C_LootHistory.GetPlayerInfo(itemIndex, playerIndex)
             local declaredKey = self:GetRollCandidateKey(name)

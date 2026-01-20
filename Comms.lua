@@ -173,8 +173,33 @@ function GLD:HandleDelta(sender, payload)
 end
 
 function GLD:BuildSnapshot()
+  local my = {
+    queuePos = nil,
+    savedPos = nil,
+    numAccepted = nil,
+    attendance = nil,
+    attendanceCount = nil,
+  }
+
+  if not self.db or not self.db.players then
+    -- DB not ready yet; return a safe empty snapshot.
+    return {
+      my = my,
+      roster = {},
+      rosterHash = nil,
+      configHash = self:ComputeConfigHash(),
+    }
+  end
+
   local roster = {}
   for key, player in pairs(self.db.players) do
+    local snapshotRole = nil
+    if self.GetRole then
+      snapshotRole = self:GetRole(player)
+    end
+    if not snapshotRole and NS.GetRoleForPlayer then
+      snapshotRole = NS:GetRoleForPlayer(player.name)
+    end
     table.insert(roster, {
       key = key,
       name = player.name,
@@ -185,20 +210,12 @@ function GLD:BuildSnapshot()
       numAccepted = player.numAccepted,
       attendance = player.attendance,
       attendanceCount = player.attendanceCount,
-      role = NS:GetRoleForPlayer(player.name),
+      role = snapshotRole,
     })
   end
 
   local rosterHash = self:ComputeRosterHashFromSnapshot(roster)
   local configHash = self:ComputeConfigHash()
-
-  local my = {
-    queuePos = nil,
-    savedPos = nil,
-    numAccepted = nil,
-    attendance = nil,
-    attendanceCount = nil,
-  }
 
   local myKey = NS:GetPlayerKeyFromUnit("player")
   if myKey then
@@ -224,8 +241,17 @@ function GLD:BroadcastSnapshot()
   if not self:IsAuthority() then
     return
   end
+  local channel = nil
+  if IsInRaid() then
+    channel = "RAID"
+  elseif IsInGroup() then
+    -- Use PARTY outside raids so snapshots reach party members.
+    channel = "PARTY"
+  else
+    return
+  end
   local snapshot = self:BuildSnapshot()
-  self:SendCommMessageSafe(NS.MSG.STATE_SNAPSHOT, snapshot, "RAID")
+  self:SendCommMessageSafe(NS.MSG.STATE_SNAPSHOT, snapshot, channel)
 end
 
 function GLD:HandleRollSession(sender, payload)

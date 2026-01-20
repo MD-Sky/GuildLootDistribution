@@ -1,9 +1,9 @@
-## Interface: 120001
+## Interface: 11508,120001
 ## Title: GuildLootDistrabution
 ## Notes: Guild loot queue and distribution manager
 ## Author: GuildLoot
 ## Version: 0.2.1
-## SavedVariables: GuildLootDB
+## SavedVariables: GuildLootDB, GuildLootTestDB
 ## SavedVariablesPerCharacter: GuildLootShadow
 ## OptionalDeps: Ace3
 
@@ -24,19 +24,25 @@ Core.lua
 Utils.lua
 ClassData.lua
 DB.lua
+TestDB.lua
 Authority.lua
 Queue.lua
 Attendance.lua
 Spec.lua
 Comms.lua
 Item.lua
+LootEngine.lua
+LiveProvider.lua
+TestProvider.lua
 Loot.lua
 Config.lua
 UnitPopup.lua
 GuildUI.lua
 Minimap.lua
 TestData.lua
+UI\RosterTemplates.xml
 UI\Main.lua
+UI\LootVotes.lua
 UI\Admin.lua
 UI\TestUI.lua
 UI\HistoryUI.lua

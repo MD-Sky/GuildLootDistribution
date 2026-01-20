@@ -40,6 +40,10 @@ function GLD:Debug(msg)
   if not self:IsDebugEnabled() then
     return
   end
+  if self.UI and self.UI.AppendDebugLine then
+    self.UI:AppendDebugLine(msg)
+    return
+  end
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99GuildLoot|r " .. tostring(msg))
 end
 
@@ -67,6 +71,9 @@ end
 
 function GLD:OnInitialize()
   self:InitDB()
+  if self.InitTestDB then
+    self:InitTestDB()
+  end
   self:InitConfig()
   self:InitComms()
   self:InitUI()
@@ -92,7 +99,7 @@ function GLD:OnEnable()
   if self.TryCreateGuildUIButton then
     self:TryCreateGuildUIButton()
   end
-  self:Print("Commands: /gld (main UI), /disadmin (admin), /gldtest (seed test), /gldadmintest (admin test panel)")
+  self:Print("Commands: /gld (main UI), /disadmin (admin), /gldtest (seed test), /gldadmintest (admin test panel), /glddebug (debug window)")
 end
 
 function GLD:RegisterSlashCommands()
@@ -127,5 +134,13 @@ function GLD:RegisterSlashCommands()
       return
     end
     NS.TestUI:ToggleTestPanel()
+  end
+
+  SLASH_GLDDEBUG1 = "/glddebug"
+  SLASH_GLDDEBUG2 = "/gldlogs"
+  SlashCmdList["GLDDEBUG"] = function()
+    if self.UI and self.UI.ToggleDebugFrame then
+      self.UI:ToggleDebugFrame()
+    end
   end
 end

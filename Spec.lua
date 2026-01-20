@@ -2,6 +2,22 @@ local _, NS = ...
 
 local GLD = NS.GLD
 
+local CLASS_FILE_TO_ID = {
+  WARRIOR = 1,
+  PALADIN = 2,
+  HUNTER = 3,
+  ROGUE = 4,
+  PRIEST = 5,
+  DEATHKNIGHT = 6,
+  SHAMAN = 7,
+  MAGE = 8,
+  WARLOCK = 9,
+  MONK = 10,
+  DRUID = 11,
+  DEMONHUNTER = 12,
+  EVOKER = 13,
+}
+
 function GLD:InitSpec()
   self.specCache = self.specCache or {}
   self.inspectQueue = self.inspectQueue or {}
@@ -19,9 +35,55 @@ function GLD:UpdatePlayerSpecFromId(player, specId)
   if not specId or specId == 0 then
     return
   end
-  local _, name = GetSpecializationInfoByID(specId)
+  if not GetSpecializationInfoByID then
+    player.specId = specId
+    return
+  end
+  local _, name, _, icon = GetSpecializationInfoByID(specId)
   player.specId = specId
   player.specName = name
+  if icon then
+    player.specIcon = icon
+  end
+end
+
+function GLD:GetSpecIcon(member)
+  if not member then
+    return nil
+  end
+  if member.specIcon and member.specIcon ~= "" then
+    return member.specIcon
+  end
+  local specId = member.specId
+  if specId and specId > 0 and GetSpecializationInfoByID then
+    local _, _, _, icon = GetSpecializationInfoByID(specId)
+    if icon then
+      return icon
+    end
+  end
+
+  local specName = member.specName or member.spec
+  local classFile = member.classFile or member.classFileName or member.class
+  if specName and classFile and GetSpecializationInfoForClassID and GetNumSpecializationsForClassID then
+    if type(classFile) == "string" then
+      classFile = classFile:upper()
+    end
+    local classID = CLASS_FILE_TO_ID[classFile]
+    if classID then
+      local count = GetNumSpecializationsForClassID(classID) or 0
+      local target = type(specName) == "string" and specName:lower() or nil
+      if target then
+        for i = 1, count do
+          local _, name, _, icon = GetSpecializationInfoForClassID(classID, i)
+          if name and icon and name:lower() == target then
+            return icon
+          end
+        end
+      end
+    end
+  end
+
+  return nil
 end
 
 function GLD:UpdateSelfSpec()
@@ -162,6 +224,90 @@ function GLD:OnPlayerSpecChanged(_, unit)
   else
     self:QueueInspect(unit)
   end
+end
+
+local function SimplifySpecName(name)
+  if not name then
+    return nil
+  end
+  local specName = tostring(name)
+  specName = specName:lower()
+  specName = specName:gsub("%s+", "")
+  specName = specName:gsub("[^%w]", "")
+  if specName == "" then
+    return nil
+  end
+  return specName
+end
+
+local function GetMemberSpecName(member)
+  if not member then
+    return nil
+  end
+  local specName = member.specName or member.spec
+  if not specName and member.specId and GetSpecializationInfoByID then
+    local _, name = GetSpecializationInfoByID(member.specId)
+    specName = name
+  end
+  if not specName or specName == "" then
+    return nil
+  end
+  return specName
+end
+
+local function GetRoleFromClassSpec(member)
+  if not member then
+    return nil
+  end
+  local classFile = member.classFile or member.classFileName or member.class
+  if not classFile or not NS.CLASS_DATA then
+    return nil
+  end
+  classFile = tostring(classFile):upper()
+  local classInfo = NS.CLASS_DATA[classFile]
+  if not classInfo or not classInfo.specs then
+    return nil
+  end
+  local target = SimplifySpecName(GetMemberSpecName(member))
+  if not target then
+    return nil
+  end
+  for specKey, specInfo in pairs(classInfo.specs) do
+    if specInfo and specInfo.role then
+      local normalizedKey = SimplifySpecName(specKey)
+      if normalizedKey == target then
+        return specInfo.role
+      end
+    end
+  end
+  return nil
+end
+
+function GLD:GetRole(member)
+  if not member then
+    return nil
+  end
+  local role = member.role
+  if role and role ~= "" and role ~= "NONE" then
+    return role
+  end
+  role = GetRoleFromClassSpec(member)
+  if role then
+    return role
+  end
+  if NS.GetRoleForPlayer then
+    local baseName = member.name and NS:GetPlayerBaseName(member.name)
+    if not baseName and member.displayName then
+      baseName = NS:GetPlayerBaseName(member.displayName)
+    end
+    if baseName then
+      role = NS:GetRoleForPlayer(baseName)
+      if role and role ~= "NONE" then
+        return role
+      end
+    end
+  end
+  return nil
 end
 
 function GLD:FinalSpecSyncBeforePull()

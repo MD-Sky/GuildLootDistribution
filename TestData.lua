@@ -18,12 +18,16 @@ local SAMPLE_PLAYERS = {
 function GLD:SeedTestData()
   local realm = GetRealmName()
 
-  self.db.players = {}
-  self.db.queue = {}
+  if not self.testDb then
+    return
+  end
+
+  self.testDb.players = {}
+  self.testDb.queue = {}
 
   for i, data in ipairs(SAMPLE_PLAYERS) do
     local key = data.name .. "-" .. realm
-    self.db.players[key] = {
+    self.testDb.players[key] = {
       name = data.name,
       realm = realm,
       class = data.class,
@@ -37,49 +41,17 @@ function GLD:SeedTestData()
       source = "test",
     }
     if data.attendance == "PRESENT" then
-      table.insert(self.db.queue, key)
+      table.insert(self.testDb.queue, key)
     else
-      self.db.players[key].savedPos = i
+      self.testDb.players[key].savedPos = i
     end
   end
 
-  self:CompactQueue()
-
-  local roster = {}
-  for _, key in ipairs(self.db.queue) do
-    local player = self.db.players[key]
-    if player then
-      table.insert(roster, {
-        key = key,
-        name = player.name,
-        class = player.class,
-        queuePos = player.queuePos,
-        attendance = player.attendance,
-        role = "NONE",
-      })
-    end
+  if NS.TestUI and NS.TestUI.RefreshTestPanel then
+    NS.TestUI:RefreshTestPanel()
   end
-
-  for key, player in pairs(self.db.players) do
-    if player.attendance == "ABSENT" then
-      table.insert(roster, {
-        key = key,
-        name = player.name,
-        class = player.class,
-        queuePos = player.queuePos,
-        attendance = player.attendance,
-        role = "NONE",
-      })
-    end
-  end
-
-  self.shadow.roster = roster
-  self.shadow.my.queuePos = 1
-  self.shadow.my.attendance = "PRESENT"
-
-  self:BroadcastSnapshot()
-  if self.UI then
-    self.UI:RefreshMain()
+  if NS.TestUI and NS.TestUI.RefreshTestDataPanel then
+    NS.TestUI:RefreshTestDataPanel()
   end
   self:Print("Test data seeded")
 end

@@ -39,6 +39,53 @@ function NS:GetPlayerKeyFromUnit(unit)
   return name .. "-" .. realm
 end
 
+local function GetClassColorObject(classFile)
+  if not classFile then
+    return nil
+  end
+  if C_ClassColor and C_ClassColor.GetClassColor then
+    return C_ClassColor.GetClassColor(classFile)
+  end
+  if RAID_CLASS_COLORS then
+    return RAID_CLASS_COLORS[classFile]
+  end
+  return nil
+end
+
+function NS:GetPlayerBaseName(name)
+  if type(name) == "string" and name ~= "" then
+    local base = strsplit("-", name)
+    if base and base ~= "" then
+      return base
+    end
+    return name
+  end
+  if name then
+    return tostring(name)
+  end
+  return nil
+end
+
+function NS:GetPlayerDisplayName(name, isGuest)
+  local base = NS:GetPlayerBaseName(name)
+  if not base or base == "" then
+    base = name or "?"
+  end
+  base = tostring(base)
+  if isGuest then
+    return base .. "-|cffffffffguest|r"
+  end
+  return base
+end
+
+function NS:GetClassColor(classFile)
+  local color = GetClassColorObject(classFile)
+  if color then
+    return color.r or 1, color.g or 1, color.b or 1
+  end
+  return 1, 1, 1
+end
+
 function NS:GetNameRealmFromKey(key)
   if not key then
     return nil

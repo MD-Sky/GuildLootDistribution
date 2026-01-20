@@ -2,6 +2,9 @@ local _, NS = ...
 
 local GLD = NS.GLD
 local AceGUI = LibStub("AceGUI-3.0", true)
+local LootEngine = NS.LootEngine
+local LiveProvider = NS.LiveProvider
+local TestProvider = NS.TestProvider
 
 local TestUI = {}
 NS.TestUI = TestUI
@@ -32,12 +35,217 @@ local CLASS_TO_ARMOR = {
   WARLOCK = "Cloth",
 }
 
+local ADMIN_ROW_HEIGHT = 20
+local ADMIN_HEADER_HEIGHT = 22
+local ADMIN_COLUMN_PADDING = 4
+local ADMIN_SECTION_PADDING = 6
+local ADMIN_BUTTON_HEIGHT = 20
+local ADMIN_SCROLLBAR_OFFSET = 24
+
+local ADMIN_HEADER_BACKDROP = {
+  bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+  edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+  tile = true,
+  tileSize = 8,
+  edgeSize = 10,
+  insets = { left = 2, right = 2, top = 2, bottom = 2 },
+}
+
+local PLAYER_COLUMNS = {
+  { key = "class", label = "Class", width = 60, align = "LEFT" },
+  { key = "spec", label = "Spec", width = 80, align = "LEFT" },
+  { key = "role", label = "Role", width = 50, align = "CENTER" },
+  { key = "name", label = "Name", width = 180, align = "LEFT" },
+  { key = "attendance", label = "Attendance", width = 90, align = "CENTER" },
+  { key = "mark", label = "Mark Present", width = 110, align = "CENTER" },
+  { key = "queue", label = "Queue", width = 60, align = "CENTER" },
+  { key = "frozen", label = "Frozen", width = 60, align = "CENTER" },
+  { key = "won", label = "Won", width = 60, align = "CENTER" },
+  { key = "raids", label = "Raids", width = 60, align = "CENTER" },
+  { key = "remove", label = "Remove", width = 70, align = "CENTER" },
+}
+
+local RESULT_COLUMNS = {
+  { key = "name", label = "Name", width = 160, align = "LEFT" },
+  { key = "choice", label = "Choice", width = 90, align = "CENTER" },
+  { key = "queue", label = "Queue Pos", width = 70, align = "CENTER" },
+  { key = "frozen", label = "Held Pos", width = 70, align = "CENTER" },
+  { key = "loot", label = "Loot Item Type", width = 150, align = "LEFT" },
+  { key = "class", label = "Class", width = 70, align = "CENTER" },
+  { key = "armor", label = "Armor Type", width = 90, align = "CENTER" },
+  { key = "weapon", label = "Weapon Type", width = 140, align = "LEFT" },
+}
+
+local TEST_DATA_COLUMNS = {
+  { key = "class", label = "Class", width = 70, align = "LEFT" },
+  { key = "spec", label = "Spec", width = 100, align = "LEFT" },
+  { key = "role", label = "Role", width = 60, align = "CENTER" },
+  { key = "name", label = "Name", width = 160, align = "LEFT" },
+  { key = "queue", label = "Queue Pos", width = 70, align = "CENTER" },
+  { key = "held", label = "Held Pos", width = 70, align = "CENTER" },
+  { key = "won", label = "Won", width = 60, align = "CENTER" },
+  { key = "raids", label = "Raids", width = 60, align = "CENTER" },
+  { key = "edit", label = "Edit", width = 50, align = "CENTER" },
+  { key = "remove", label = "Remove", width = 60, align = "CENTER" },
+}
+
+local function AddSpecialFrame(name)
+  if not name then
+    return
+  end
+  if not UISpecialFrames then
+    UISpecialFrames = {}
+  end
+  for _, existing in ipairs(UISpecialFrames) do
+    if existing == name then
+      return
+    end
+  end
+  table.insert(UISpecialFrames, name)
+end
+
+local function CopyColumnDefs(columns)
+  local copy = {}
+  for index, col in ipairs(columns or {}) do
+    local entry = {}
+    for key, value in pairs(col) do
+      entry[key] = value
+    end
+    copy[index] = entry
+  end
+  return copy
+end
+
+local function BuildColumnMap(columns)
+  local map = {}
+  for _, col in ipairs(columns or {}) do
+    map[col.key] = col
+  end
+  return map
+end
+
+local function UpdateColumnOffsets(columns, startX)
+  local x = startX or 0
+  for _, col in ipairs(columns or {}) do
+    col.x = x
+    x = x + col.width + ADMIN_COLUMN_PADDING
+  end
+end
+
+local function ApplyHeaderCellStyle(frame)
+  if not frame or not frame.SetBackdrop then
+    return
+  end
+  frame:SetBackdrop(ADMIN_HEADER_BACKDROP)
+  frame:SetBackdropColor(0.12, 0.12, 0.12, 0.9)
+  frame:SetBackdropBorderColor(0.35, 0.35, 0.35, 0.9)
+end
+
+local function SetEditBoxEnabled(editBox, enabled)
+  if not editBox then
+    return
+  end
+  if editBox.SetEnabled then
+    editBox:SetEnabled(enabled)
+  else
+    editBox:EnableMouse(enabled)
+  end
+  if editBox.SetTextColor then
+    if enabled then
+      editBox:SetTextColor(1, 1, 1)
+    else
+      editBox:SetTextColor(0.6, 0.6, 0.6)
+    end
+  end
+end
+
+local function ParseNonNegativeInt(text)
+  local num = tonumber(text)
+  if not num or num < 0 then
+    return nil
+  end
+  if math.floor(num) ~= num then
+    return nil
+  end
+  return num
+end
+
+local function GetClassColor(classFile)
+  if not classFile then
+    return 1, 1, 1
+  end
+  local color = nil
+  if C_ClassColor and C_ClassColor.GetClassColor then
+    color = C_ClassColor.GetClassColor(classFile)
+  elseif RAID_CLASS_COLORS then
+    color = RAID_CLASS_COLORS[classFile]
+  end
+  if color then
+    return color.r or 1, color.g or 1, color.b or 1
+  end
+  return 1, 1, 1
+end
+
+local function GetAttendanceColor(attendance)
+  local key = (attendance or ""):upper()
+  if key == "PRESENT" then
+    return 0.55, 0.9, 0.55
+  end
+  return 0.9, 0.45, 0.45
+end
+
 local function GetArmorForClass(classFile)
   local data = CLASS_DATA and CLASS_DATA[classFile]
   if data and data.armor then
     return data.armor
   end
   return CLASS_TO_ARMOR[classFile] or "-"
+end
+
+local function GetRoleForClassSpec(classFile, specName)
+  if not classFile or not specName then
+    return "-"
+  end
+  local classData = CLASS_DATA and CLASS_DATA[classFile]
+  if not classData or not classData.specs then
+    return "-"
+  end
+  local target = tostring(specName):lower()
+  for name, data in pairs(classData.specs) do
+    if name and name:lower() == target then
+      return data and data.role or "-"
+    end
+  end
+  return "-"
+end
+
+local function GetSortedKeys(tbl)
+  local keys = {}
+  for key in pairs(tbl or {}) do
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
+  return keys
+end
+
+local function BuildClassOptions()
+  local options = {}
+  for _, classToken in ipairs(GetSortedKeys(CLASS_DATA)) do
+    options[classToken] = classToken
+  end
+  return options
+end
+
+local function BuildSpecOptionsForClass(classToken)
+  local options = {}
+  local classData = CLASS_DATA and CLASS_DATA[classToken]
+  if classData and classData.specs then
+    local specs = GetSortedKeys(classData.specs)
+    for _, specName in ipairs(specs) do
+      options[specName] = specName
+    end
+  end
+  return options
 end
 
 local function BuildDynamicTestVoters()
@@ -60,9 +268,17 @@ local function BuildDynamicTestVoters()
     if realm and realm ~= "" then
       displayName = name .. "-" .. realm
     end
+    local specName = nil
+    if GLD and GLD.FindPlayerKeyByName then
+      local key = GLD:FindPlayerKeyByName(name, realm)
+      if key and GLD.db and GLD.db.players and GLD.db.players[key] then
+        specName = GLD.db.players[key].specName or GLD.db.players[key].spec
+      end
+    end
     voters[#voters + 1] = {
       name = displayName,
       class = classFile,
+      spec = specName,
       armor = armor,
       weapon = nil,
     }
@@ -85,8 +301,105 @@ local function BuildDynamicTestVoters()
   return nil
 end
 
+local function IsSolo()
+  return not IsInGroup() and not IsInRaid()
+end
+
+local function GetTestDB()
+  return GLD.testDb
+end
+
+local function GetTestPlayersTable()
+  local db = GetTestDB()
+  return db and db.players or {}
+end
+
+local function GetLivePlayersTable()
+  return GLD.db and GLD.db.players or {}
+end
+
+local function GetLivePlayerDisplayName(player, key, isGuest)
+  local rawName = nil
+  if player then
+    rawName = player.name or player.fullName or player.displayName
+  end
+  if (not rawName or rawName == "") and key and NS.GetNameRealmFromKey then
+    local name, _ = NS:GetNameRealmFromKey(key)
+    rawName = name
+  end
+  if not rawName or rawName == "" then
+    return key or "?"
+  end
+  return NS:GetPlayerDisplayName(rawName, isGuest)
+end
+
+local function BuildAdminRosterList()
+  local list = {}
+  for key, player in pairs(GetLivePlayersTable()) do
+    if player then
+      list[#list + 1] = { key = key, player = player }
+    end
+  end
+  return list
+end
+
+local function BuildTestVotersFromDB()
+  local voters = {}
+  for _, player in pairs(GetTestPlayersTable()) do
+    if player and player.name then
+      local fullName = player.name
+      if player.realm and player.realm ~= "" then
+        fullName = player.name .. "-" .. player.realm
+      end
+      local specName = player.specName or player.spec
+      voters[#voters + 1] = {
+        name = fullName,
+        class = player.class,
+        spec = specName,
+        armor = GetArmorForClass(player.class),
+        weapon = player.weaponType or "-",
+      }
+    end
+  end
+  table.sort(voters, function(a, b)
+    local nameA = NS:GetPlayerBaseName(a.name) or (a.name or "")
+    local nameB = NS:GetPlayerBaseName(b.name) or (b.name or "")
+    return nameA < nameB
+  end)
+  return voters
+end
+
 local function GetActiveVoters()
-  return TestUI.dynamicVoters or TEST_VOTERS
+  if TestUI.dynamicVoters and #TestUI.dynamicVoters > 0 then
+    return TestUI.dynamicVoters
+  end
+  local dbVoters = BuildTestVotersFromDB()
+  if #dbVoters > 0 then
+    return dbVoters
+  end
+  return TEST_VOTERS
+end
+
+local function BuildSoloExpectedVoters(voters)
+  local expected = {}
+  local seen = {}
+  for _, entry in ipairs(voters or {}) do
+    local key = nil
+    if entry and entry.name then
+      local name, realm = NS:SplitNameRealm(entry.name)
+      if TestProvider and TestProvider.GetPlayerKeyByName then
+        key = TestProvider:GetPlayerKeyByName(name, realm)
+      end
+      if not key then
+        key = GLD:GetRollCandidateKey(entry.name)
+      end
+    end
+    if key and not seen[key] then
+      expected[#expected + 1] = key
+      seen[key] = true
+    end
+  end
+  return expected
 end
 
 local function GetTestPlayerKey(name, realm)
@@ -102,8 +415,12 @@ local function GetOrCreateTestPlayer(name, realm, class)
   if not key then
     return nil, nil
   end
-  TestUI.testPlayers = TestUI.testPlayers or {}
-  local player = TestUI.testPlayers[key]
+  local db = GetTestDB()
+  if not db then
+    return nil, nil
+  end
+  db.players = db.players or {}
+  local player = db.players[key]
   if not player then
     player = {
       name = name,
@@ -115,7 +432,7 @@ local function GetOrCreateTestPlayer(name, realm, class)
       queuePos = nil,
       savedPos = 0,
     }
-    TestUI.testPlayers[key] = player
+    db.players[key] = player
   end
   return player, key
 end
@@ -133,27 +450,7 @@ local function BuildTestRosterList()
     return list
   end
 
-  TestUI.testPlayers = TestUI.testPlayers or {}
-  if next(TestUI.testPlayers) == nil then
-    for _, player in pairs(GLD.db.players) do
-      local copy = {
-        name = player.name,
-        realm = player.realm or GetRealmName(),
-        class = player.class,
-        attendance = player.attendance,
-        queuePos = player.queuePos,
-        savedPos = player.savedPos,
-        numAccepted = player.numAccepted or 0,
-        attendanceCount = player.attendanceCount or 0,
-      }
-      local key = GetTestPlayerKey(copy.name, copy.realm)
-      if key then
-        TestUI.testPlayers[key] = copy
-      end
-    end
-  end
-
-  for _, player in pairs(TestUI.testPlayers) do
+  for _, player in pairs(GetTestPlayersTable()) do
     list[#list + 1] = player
   end
   return list
@@ -201,11 +498,63 @@ local function NormalizeItemInput(itemLink)
   return normalized
 end
 
+local function ResolveItemClassId(itemType)
+  if not itemType or not ITEM_CLASSES then
+    return nil
+  end
+  for classId, className in pairs(ITEM_CLASSES) do
+    if className == itemType then
+      return classId
+    end
+  end
+  return nil
+end
+
+local function GetItemInfoInstantCompat(itemLink)
+  if not itemLink or itemLink == "" then
+    return nil
+  end
+  if C_Item and C_Item.GetItemInfoInstant then
+    local itemID, itemType, itemSubType, itemEquipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(itemLink)
+    if classID ~= nil then
+      return classID, subClassID, itemType, itemEquipLoc
+    end
+    if type(itemID) == "number" and type(itemType) == "number" then
+      return itemID, itemType, itemSubType, itemEquipLoc
+    end
+    local resolvedClassID = ResolveItemClassId(itemType)
+    if resolvedClassID then
+      return resolvedClassID, subClassID, itemType, itemEquipLoc
+    end
+  end
+  if GetItemInfoInstant then
+    local itemID, itemType, itemSubType, itemEquipLoc, _, classID, subClassID = GetItemInfoInstant(itemLink)
+    if classID ~= nil then
+      return classID, subClassID, itemType, itemEquipLoc
+    end
+    if type(itemID) == "number" and type(itemType) == "number" then
+      return itemID, itemType, itemSubType, itemEquipLoc
+    end
+    local resolvedClassID = ResolveItemClassId(itemType)
+    if resolvedClassID then
+      return resolvedClassID, subClassID, itemType, itemEquipLoc
+    end
+  end
+  if GetItemInfo then
+    local _, _, _, _, _, itemType, itemSubType, _, itemEquipLoc = GetItemInfo(itemLink)
+    local resolvedClassID = ResolveItemClassId(itemType)
+    if resolvedClassID then
+      return resolvedClassID, nil, itemSubType, itemEquipLoc
+    end
+  end
+  return nil
+end
+
 local function IsEligibleForNeedSafe(classFile, itemLink)
   if not classFile or not itemLink then
     return false
   end
-  local classID = C_Item.GetItemInfoInstant(itemLink)
+  local classID = GetItemInfoInstantCompat(itemLink)
   if not classID then
     GLD:RequestItemData(itemLink)
     return true
@@ -243,10 +592,25 @@ local function GetArmorTypeOnly(itemLink)
   if not itemLink then
     return "-"
   end
-  local classID, subClassID = C_Item.GetItemInfoInstant(itemLink)
+  if GLD and GLD.IsItemInfoTrinket and GLD:IsItemInfoTrinket(itemLink) then
+    return "Trinket"
+  end
+  local classID, subClassID = GetItemInfoInstantCompat(itemLink)
   if not classID then
+    if GLD and GLD.IsItemInfoTrinket and GLD:IsItemInfoTrinket(itemLink) then
+      return "Trinket"
+    end
+    if GLD and GLD.IsKnownTrinket and GLD:IsKnownTrinket(itemLink) then
+      return "Trinket"
+    end
     GLD:RequestItemData(itemLink)
     return "-"
+  end
+  if GLD and GLD.GetItemSetName then
+    local setName = GLD:GetItemSetName(itemLink)
+    if setName and setName ~= "" then
+      return "Tier"
+    end
   end
   if classID == 4 then
     local armor = ARMOR_SPECIAL[subClassID] or ARMOR_SUBCLASS[subClassID]
@@ -255,11 +619,21 @@ local function GetArmorTypeOnly(itemLink)
     end
   end
   if classID == 2 then
+    local _, _, _, _, _, itemType, itemSubType = GetItemInfo(itemLink)
+    if itemSubType and itemSubType ~= "" then
+      return "Weapon - " .. itemSubType
+    end
     return "Weapon"
   end
   local _, _, _, _, _, itemType, itemSubType = GetItemInfo(itemLink)
   if itemType == "Armor" and itemSubType and itemSubType ~= "" then
     return itemSubType
+  end
+  if GLD and GLD.IsItemInfoTrinket and GLD:IsItemInfoTrinket(itemLink) then
+    return "Trinket"
+  end
+  if GLD and GLD.IsKnownTrinket and GLD:IsKnownTrinket(itemLink) then
+    return "Trinket"
   end
   if itemType and itemType ~= "" then
     return itemType
@@ -271,8 +645,14 @@ local function GetLootTypeText(itemLink)
   if not itemLink then
     return "-"
   end
-  local classID, subClassID, _, equipLoc = C_Item.GetItemInfoInstant(itemLink)
+  local classID, subClassID, _, equipLoc = GetItemInfoInstantCompat(itemLink)
   if not classID then
+    if GLD and GLD.IsItemInfoTrinket and GLD:IsItemInfoTrinket(itemLink) then
+      return "Trinket"
+    end
+    if GLD and GLD.IsKnownTrinket and GLD:IsKnownTrinket(itemLink) then
+      return "Trinket"
+    end
     return "-"
   end
   if classID == 4 then
@@ -283,6 +663,12 @@ local function GetLootTypeText(itemLink)
   if classID == 2 then
     return "Weapon"
   end
+  if GLD and GLD.IsItemInfoTrinket and GLD:IsItemInfoTrinket(itemLink) then
+    return "Trinket"
+  end
+  if GLD and GLD.IsKnownTrinket and GLD:IsKnownTrinket(itemLink) then
+    return "Trinket"
+  end
   return "Other"
 end
 
@@ -290,8 +676,14 @@ local function GetLootTypeDetailed(itemLink)
   if not itemLink then
     return "-"
   end
-  local classID, subClassID, _, equipLoc = C_Item.GetItemInfoInstant(itemLink)
+  local classID, subClassID, _, equipLoc = GetItemInfoInstantCompat(itemLink)
   if not classID then
+    if GLD and GLD.IsItemInfoTrinket and GLD:IsItemInfoTrinket(itemLink) then
+      return "Trinket"
+    end
+    if GLD and GLD.IsKnownTrinket and GLD:IsKnownTrinket(itemLink) then
+      return "Trinket"
+    end
     return "-"
   end
   if classID == 4 then
@@ -306,6 +698,12 @@ local function GetLootTypeDetailed(itemLink)
     end
     return "Weapon"
   end
+  if GLD and GLD.IsItemInfoTrinket and GLD:IsItemInfoTrinket(itemLink) then
+    return "Trinket"
+  end
+  if GLD and GLD.IsKnownTrinket and GLD:IsKnownTrinket(itemLink) then
+    return "Trinket"
+  end
   local _, _, _, _, _, itemType = GetItemInfo(itemLink)
   return itemType or "Other"
 end
@@ -313,6 +711,11 @@ end
 local function IsPreferredItemForEntry(entry, itemLink)
   if not entry or not itemLink then
     return false
+  end
+  if GLD.IsEligibleForNeed then
+    if not GLD:IsEligibleForNeed(entry.class, itemLink, entry.spec) then
+      return false
+    end
   end
   if GLD.GetItemClassRestrictions then
     local restriction = GLD:GetItemClassRestrictions(itemLink)
@@ -323,6 +726,9 @@ local function IsPreferredItemForEntry(entry, itemLink)
   local armorType = GetArmorTypeOnly(itemLink)
   if armorType == "Cloth" or armorType == "Leather" or armorType == "Mail" or armorType == "Plate" then
     return entry.armor == armorType
+  end
+  if armorType == "Trinket" then
+    return true
   end
   local _, _, _, _, _, itemType, itemSubType = GetItemInfo(itemLink)
   if itemType == "Weapon" then
@@ -428,15 +834,86 @@ end
 local DEFAULT_TEST_RAID = "Manaforge Omega"
 local DEFAULT_TEST_ENCOUNTER = "Manaforge Omega"
 
-local function ColorizeClassName(name, classFile)
-  if not name then
-    return "?"
+local function ColorizeClassName(name, classFile, isGuest)
+  local displayName = NS:GetPlayerDisplayName(name, isGuest)
+  if not displayName or displayName == "" then
+    displayName = "?"
   end
-  if classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile] then
-    local c = RAID_CLASS_COLORS[classFile]
-    return string.format("|cff%02x%02x%02x%s|r", c.r * 255, c.g * 255, c.b * 255, name)
+  local r, g, b = NS:GetClassColor(classFile)
+  if r and g and b then
+    return string.format("|cff%02x%02x%02x%s|r", (r * 255), (g * 255), (b * 255), displayName)
   end
-  return name
+  return displayName
+end
+
+local function BuildVoteRow(parent, playerName, voteOptions)
+  if not parent or not AceGUI then
+    return nil
+  end
+  local row = AceGUI:Create("SimpleGroup")
+  row:SetFullWidth(true)
+  row:SetLayout("Flow")
+
+  local nameLabel = AceGUI:Create("Label")
+  nameLabel:SetText(playerName or "?")
+  nameLabel:SetWidth(140)
+  row:AddChild(nameLabel)
+
+  local buttons = {}
+  for _, opt in ipairs(voteOptions or {}) do
+    local btn = AceGUI:Create("Button")
+    btn:SetText(opt.label or "?")
+    btn:SetWidth(70)
+    if opt.disabled and btn.SetDisabled then
+      btn:SetDisabled(true)
+    end
+    btn:SetCallback("OnClick", function()
+      if opt.onClick then
+        opt.onClick(opt.vote)
+      end
+    end)
+    row:AddChild(btn)
+    buttons[#buttons + 1] = btn
+  end
+
+  local statusLabel = AceGUI:Create("Label")
+  statusLabel:SetText("")
+  statusLabel:SetWidth(60)
+  row:AddChild(statusLabel)
+
+  parent:AddChild(row)
+  return {
+    row = row,
+    buttons = buttons,
+    statusLabel = statusLabel,
+  }
+end
+
+local function SetTestAttendance(player, state)
+  if not player then
+    return
+  end
+  local changed = player.attendance ~= state
+  if state == "ABSENT" then
+    if player.attendance ~= "ABSENT" then
+      player.savedPos = player.queuePos or player.savedPos
+      player.queuePos = nil
+    end
+    player.attendance = "ABSENT"
+    if changed and GLD.NormalizeTestQueuePositions then
+      GLD:NormalizeTestQueuePositions()
+    end
+    return
+  end
+  if state == "PRESENT" then
+    if player.attendance ~= "PRESENT" and player.savedPos and player.savedPos > 0 then
+      player.queuePos = player.savedPos
+    end
+    player.attendance = "PRESENT"
+    if changed and GLD.NormalizeTestQueuePositions then
+      GLD:NormalizeTestQueuePositions()
+    end
+  end
 end
 
 function TestUI:SetEJStatus(text)
@@ -451,15 +928,17 @@ function GLD:InitTestUI()
   TestUI.currentVoterIndex = 0
   TestUI.disableManualVotes = true
   TestUI.queueEditEnabled = false
-  TestUI.testSessionActive = GLD.db.testSession and GLD.db.testSession.active or false
+  TestUI.testSessionActive = GLD.testDb and GLD.testDb.testSession and GLD.testDb.testSession.active or false
   TestUI.testHistoryFrame = nil
   TestUI.testGraphsFrame = nil
   TestUI.testGraphsDebug = false
-  TestUI.testPlayers = TestUI.testPlayers or {}
 end
 
 function TestUI:StartTestSession()
   if self.testSessionActive then
+    return
+  end
+  if not GLD.testDb then
     return
   end
   local id = tostring(GetServerTime()) .. "-" .. tostring(math.random(1000, 9999))
@@ -471,10 +950,10 @@ function TestUI:StartTestSession()
     loot = {},
     bosses = {},
   }
-  GLD.db.testSessions = GLD.db.testSessions or {}
-  table.insert(GLD.db.testSessions, 1, entry)
-  GLD.db.testSession.active = true
-  GLD.db.testSession.currentId = id
+  GLD.testDb.testSessions = GLD.testDb.testSessions or {}
+  table.insert(GLD.testDb.testSessions, 1, entry)
+  GLD.testDb.testSession.active = true
+  GLD.testDb.testSession.currentId = id
   self.testSessionActive = true
 end
 
@@ -482,16 +961,16 @@ function TestUI:EndTestSession()
   if not self.testSessionActive then
     return
   end
-  if GLD.db.testSession and GLD.db.testSession.currentId then
-    for _, entry in ipairs(GLD.db.testSessions or {}) do
-      if entry.id == GLD.db.testSession.currentId then
+  if GLD.testDb and GLD.testDb.testSession and GLD.testDb.testSession.currentId then
+    for _, entry in ipairs(GLD.testDb.testSessions or {}) do
+      if entry.id == GLD.testDb.testSession.currentId then
         entry.endedAt = GetServerTime()
         break
       end
     end
   end
-  GLD.db.testSession.active = false
-  GLD.db.testSession.currentId = nil
+  GLD.testDb.testSession.active = false
+  GLD.testDb.testSession.currentId = nil
   self.testSessionActive = false
 end
 
@@ -520,6 +999,184 @@ function TestUI:ResetSoloTestVotes()
   end
   if GLD.UI and GLD.UI.RefreshPendingVotes then
     GLD.UI:RefreshPendingVotes()
+  end
+end
+
+function TestUI:ShowSoloSimVotePopup(session, testPlayers)
+  if not AceGUI or not session then
+    return
+  end
+
+  local voters = testPlayers or {}
+  if #voters == 0 then
+    GLD:Print("No test players available for solo voting.")
+    return
+  end
+
+  if self.soloVoteFrame then
+    self.soloVoteFrame:Release()
+    self.soloVoteFrame = nil
+  end
+
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Solo Test Votes")
+  frame:SetStatusText(session.itemName or "Item")
+  frame:SetWidth(520)
+  frame:SetHeight(420)
+  frame:SetLayout("Flow")
+  frame:EnableResize(false)
+
+  frame:SetCallback("OnClose", function(widget)
+    self.soloVoteFrame = nil
+    self.soloVoteScroll = nil
+    widget:Release()
+  end)
+
+  local header = AceGUI:Create("SimpleGroup")
+  header:SetFullWidth(true)
+  header:SetLayout("Flow")
+  frame:AddChild(header)
+
+  local icon = "Interface\\Icons\\INV_Misc_QuestionMark"
+  if session.itemLink then
+    local itemIcon = select(10, GetItemInfo(session.itemLink))
+    if itemIcon then
+      icon = itemIcon
+    else
+      GLD:RequestItemData(session.itemLink)
+    end
+  end
+
+  local iconWidget = AceGUI:Create("Icon")
+  iconWidget:SetImage(icon)
+  iconWidget:SetImageSize(28, 28)
+  iconWidget:SetWidth(32)
+  iconWidget:SetHeight(32)
+  iconWidget:SetCallback("OnEnter", function()
+    local link = session.itemLink
+    if link and link ~= "" then
+      GameTooltip:SetOwner(iconWidget.frame, "ANCHOR_CURSOR")
+      GameTooltip:SetHyperlink(link)
+      GameTooltip:Show()
+    end
+  end)
+  iconWidget:SetCallback("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+  header:AddChild(iconWidget)
+
+  local itemLabel = AceGUI:Create("InteractiveLabel")
+  itemLabel:SetText(session.itemLink or session.itemName or "Unknown Item")
+  itemLabel:SetWidth(440)
+  itemLabel:SetCallback("OnEnter", function()
+    local link = session.itemLink
+    if link and link ~= "" then
+      GameTooltip:SetOwner(itemLabel.frame, "ANCHOR_CURSOR")
+      GameTooltip:SetHyperlink(link)
+      GameTooltip:Show()
+    end
+  end)
+  itemLabel:SetCallback("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+  header:AddChild(itemLabel)
+
+  local scroll = AceGUI:Create("ScrollFrame")
+  scroll:SetFullWidth(true)
+  scroll:SetHeight(340)
+  scroll:SetLayout("Flow")
+  frame:AddChild(scroll)
+
+  self.soloVoteFrame = frame
+  self.soloVoteScroll = scroll
+  self.testVotes = self.testVotes or {}
+
+  local rowState = {}
+
+  local function applyVote(entry, vote)
+    session.votes = session.votes or {}
+    local key = nil
+    if entry and entry.name then
+      local name, realm = NS:SplitNameRealm(entry.name)
+      if TestProvider and TestProvider.GetPlayerKeyByName then
+        key = TestProvider:GetPlayerKeyByName(name, realm)
+      end
+      if not key then
+        key = GLD:GetRollCandidateKey(entry.name)
+      end
+    end
+    if key then
+      session.votes[key] = vote
+    end
+    if entry and entry.name then
+      self.testVotes[entry.name] = vote
+    end
+    if key and rowState[key] then
+      local controls = rowState[key]
+      if controls.statusLabel then
+        controls.statusLabel:SetText("voted")
+      end
+      for _, btn in ipairs(controls.buttons or {}) do
+        if btn.SetDisabled then
+          btn:SetDisabled(true)
+        end
+      end
+    end
+    if self.RefreshResultsPanel then
+      self:RefreshResultsPanel()
+    end
+    if GLD.UI and GLD.UI.RefreshPendingVotes then
+      GLD.UI:RefreshPendingVotes()
+    end
+    if GLD.CheckRollCompletion then
+      GLD:CheckRollCompletion(session)
+    end
+    if session.locked then
+      GLD:Print("Result locked. Your vote was recorded but the outcome is final.")
+    end
+  end
+
+  for _, entry in ipairs(voters) do
+    local displayName = ColorizeClassName(entry.name or "Test Player", entry.class)
+    local canNeed = true
+    if session.itemLink then
+      canNeed = IsNeedAllowedForEntry(entry, session.itemLink)
+    end
+    local voteOptions = {
+      { label = "Need", vote = "NEED", disabled = not canNeed },
+      { label = "Greed", vote = "GREED" },
+      { label = "Transmog", vote = "TRANSMOG" },
+      { label = "Pass", vote = "PASS" },
+    }
+    for _, opt in ipairs(voteOptions) do
+      opt.onClick = function(vote)
+        applyVote(entry, vote)
+      end
+    end
+    local controls = BuildVoteRow(scroll, displayName, voteOptions)
+    local key = nil
+    if entry and entry.name then
+      local name, realm = NS:SplitNameRealm(entry.name)
+      if TestProvider and TestProvider.GetPlayerKeyByName then
+        key = TestProvider:GetPlayerKeyByName(name, realm)
+      end
+      if not key then
+        key = GLD:GetRollCandidateKey(entry.name)
+      end
+    end
+    if key and controls then
+      rowState[key] = controls
+      if session.votes and session.votes[key] then
+        if controls.statusLabel then
+          controls.statusLabel:SetText("voted")
+        end
+        for _, btn in ipairs(controls.buttons or {}) do
+          if btn.SetDisabled then
+            btn:SetDisabled(true)
+          end
+        end
+      end
+    end
   end
 end
 
@@ -589,312 +1246,812 @@ function TestUI:ToggleTestPanel()
   end
   if self.testFrame:IsShown() then
     self.testFrame:Hide()
-    if self.lootFrame then
-      self.lootFrame:Hide()
-    end
   else
     self:ResetTestVotes()
     self.testFrame:Show()
-    if self.lootFrame then
-      self.lootFrame:Show()
-      self:UpdateLootFrameToggle()
-    end
+    self:SetActiveAdminTab("admin")
     GLD:Print("Test panel opened")
     self:RefreshTestPanel()
   end
 end
 
-function TestUI:UpdateLootFrameToggle()
-  if not self.lootToggleBtn then
-    return
+function TestUI:SetActiveAdminTab(tab)
+  self.activeAdminTab = tab or "admin"
+  if self.adminPanel then
+    self.adminPanel:SetShown(self.activeAdminTab == "admin")
   end
-  local open = self.lootFrame and self.lootFrame:IsShown()
-  self.lootToggleBtn:SetText(open and ">" or "<")
-end
-
-function TestUI:ToggleLootFrame()
-  if not self.lootFrame then
-    return
+  if self.lootFrame then
+    self.lootFrame:SetShown(self.activeAdminTab == "loot")
   end
-  if self.lootFrame:IsShown() then
-    self.lootFrame:Hide()
-  else
-    self.lootFrame:Show()
+  if self.dataPanel then
+    self.dataPanel:SetShown(self.activeAdminTab == "data")
+  end
+  if self.historyPanel then
+    self.historyPanel:SetShown(self.activeAdminTab == "history")
   end
   self:UpdateLootFrameToggle()
 end
 
-function TestUI:CreateTestFrame()
-  local frame = AceGUI:Create("Frame")
-  frame:SetTitle("Admin Test Panel")
-  frame:SetStatusText("Test Session / Loot / Variables")
-  frame:SetWidth(900)
-  frame:SetHeight(600)
-  frame:SetLayout("Flow")
-  frame:EnableResize(false)
+function TestUI:UpdateLootFrameToggle()
+  if not self.adminTabButton or not self.lootTabButton or not self.dataTabButton or not self.historyTabButton then
+    return
+  end
+  local activeTab = self.activeAdminTab or "admin"
+  if PanelTemplates_SelectTab and PanelTemplates_DeselectTab then
+    PanelTemplates_DeselectTab(self.adminTabButton)
+    PanelTemplates_DeselectTab(self.lootTabButton)
+    PanelTemplates_DeselectTab(self.dataTabButton)
+    PanelTemplates_DeselectTab(self.historyTabButton)
+    if activeTab == "loot" then
+      PanelTemplates_SelectTab(self.lootTabButton)
+    elseif activeTab == "data" then
+      PanelTemplates_SelectTab(self.dataTabButton)
+    elseif activeTab == "history" then
+      PanelTemplates_SelectTab(self.historyTabButton)
+    else
+      PanelTemplates_SelectTab(self.adminTabButton)
+    end
+  else
+    local activeR, activeG, activeB = 1, 0.9, 0.6
+    local inactiveR, inactiveG, inactiveB = 1, 1, 1
+    if self.adminTabButton.Text then
+      local active = activeTab == "admin"
+      self.adminTabButton.Text:SetTextColor(active and activeR or inactiveR, active and activeG or inactiveG, active and activeB or inactiveB)
+    end
+    if self.lootTabButton.Text then
+      local active = activeTab == "loot"
+      self.lootTabButton.Text:SetTextColor(active and activeR or inactiveR, active and activeG or inactiveG, active and activeB or inactiveB)
+    end
+    if self.dataTabButton.Text then
+      local active = activeTab == "data"
+      self.dataTabButton.Text:SetTextColor(active and activeR or inactiveR, active and activeG or inactiveG, active and activeB or inactiveB)
+    end
+    if self.historyTabButton.Text then
+      local active = activeTab == "history"
+      self.historyTabButton.Text:SetTextColor(active and activeR or inactiveR, active and activeG or inactiveG, active and activeB or inactiveB)
+    end
+  end
+end
 
-  if frame.frame then
-    local toggleBtn = CreateFrame("Button", nil, frame.frame, "UIPanelButtonTemplate")
-    toggleBtn:SetSize(18, 40)
-    toggleBtn:SetPoint("LEFT", frame.frame, "LEFT", -8, 0)
-    toggleBtn:SetText(">")
-    toggleBtn:SetScript("OnClick", function()
-      TestUI:ToggleLootFrame()
-    end)
-    self.lootToggleBtn = toggleBtn
+function TestUI:ToggleLootFrame()
+  if not self.testFrame then
+    return
+  end
+  local nextTab = self.activeAdminTab == "loot" and "admin" or "loot"
+  self:SetActiveAdminTab(nextTab)
+end
+
+function TestUI:CreateTestFrame()
+  local frame = CreateFrame("Frame", "GLDAdminTestFrame", UIParent, "BackdropTemplate")
+  frame:SetSize(980, 710)
+  frame:SetPoint("CENTER")
+  frame:SetMovable(true)
+  frame:EnableMouse(true)
+  frame:RegisterForDrag("LeftButton")
+  frame:SetScript("OnDragStart", frame.StartMoving)
+  frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+  frame:SetClampedToScreen(true)
+  frame:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true,
+    tileSize = 32,
+    edgeSize = 32,
+    insets = { left = 8, right = 8, top = 8, bottom = 8 },
+  })
+  frame:SetBackdropColor(0.08, 0.08, 0.08, 0.95)
+  AddSpecialFrame(frame:GetName())
+
+  local header = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+  header:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -8)
+  header:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -16, -8)
+  header:SetHeight(28)
+  ApplyHeaderCellStyle(header)
+
+  local titleText = header:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+  titleText:SetPoint("LEFT", header, "LEFT", 8, 0)
+  titleText:SetText("Admin Test Panel")
+  frame.TitleText = titleText
+
+  local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+  closeButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -6)
+  frame.CloseButton = closeButton
+
+  local statusText = frame:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  statusText:SetPoint("RIGHT", closeButton, "LEFT", -8, 0)
+  statusText:SetText("Test Session / Loot / Data / History")
+
+  local content = CreateFrame("Frame", nil, frame)
+  content:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 0, -8)
+  content:SetPoint("TOPRIGHT", header, "BOTTOMRIGHT", 0, -8)
+  content:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 16, 16)
+  content:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 16)
+
+  local tabBar = CreateFrame("Frame", nil, content)
+  tabBar:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+  tabBar:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, 0)
+  tabBar:SetHeight(24)
+
+  local adminTabButton = CreateFrame("Button", nil, tabBar, "PanelTabButtonTemplate")
+  adminTabButton:SetText("Admin")
+  if PanelTemplates_TabResize then
+    PanelTemplates_TabResize(adminTabButton, 0)
+  end
+  adminTabButton:SetPoint("LEFT", tabBar, "LEFT", 0, 0)
+  adminTabButton:SetScript("OnClick", function()
+    TestUI:SetActiveAdminTab("admin")
+  end)
+
+  local lootTabButton = CreateFrame("Button", nil, tabBar, "PanelTabButtonTemplate")
+  lootTabButton:SetText("Test Loot")
+  if PanelTemplates_TabResize then
+    PanelTemplates_TabResize(lootTabButton, 0)
+  end
+  lootTabButton:SetPoint("LEFT", adminTabButton, "RIGHT", 4, 0)
+  lootTabButton:SetScript("OnClick", function()
+    TestUI:SetActiveAdminTab("loot")
+  end)
+
+  local dataTabButton = CreateFrame("Button", nil, tabBar, "PanelTabButtonTemplate")
+  dataTabButton:SetText("Test Data")
+  if PanelTemplates_TabResize then
+    PanelTemplates_TabResize(dataTabButton, 0)
+  end
+  dataTabButton:SetPoint("LEFT", lootTabButton, "RIGHT", 4, 0)
+  dataTabButton:SetScript("OnClick", function()
+    TestUI:SetActiveAdminTab("data")
+  end)
+
+  local historyTabButton = CreateFrame("Button", nil, tabBar, "PanelTabButtonTemplate")
+  historyTabButton:SetText("History")
+  if PanelTemplates_TabResize then
+    PanelTemplates_TabResize(historyTabButton, 0)
+  end
+  historyTabButton:SetPoint("LEFT", dataTabButton, "RIGHT", 4, 0)
+  historyTabButton:SetScript("OnClick", function()
+    TestUI:SetActiveAdminTab("history")
+  end)
+
+  local adminPanel = CreateFrame("Frame", nil, content)
+  adminPanel:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", 0, -6)
+  adminPanel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
+
+  local lootPanel = CreateFrame("Frame", nil, content)
+  lootPanel:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", 0, -6)
+  lootPanel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
+  lootPanel:Hide()
+
+  local dataPanel = CreateFrame("Frame", nil, content)
+  dataPanel:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", 0, -6)
+  dataPanel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
+  dataPanel:Hide()
+
+  local historyPanel = CreateFrame("Frame", nil, content)
+  historyPanel:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", 0, -6)
+  historyPanel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
+  historyPanel:Hide()
+
+  local sessionBar = CreateFrame("Frame", nil, adminPanel, "InsetFrameTemplate3")
+  sessionBar:SetPoint("TOPLEFT", adminPanel, "TOPLEFT", 0, 0)
+  sessionBar:SetPoint("TOPRIGHT", adminPanel, "TOPRIGHT", 0, 0)
+  sessionBar:SetHeight(42)
+
+  local sessionTitle = sessionBar:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  sessionTitle:SetPoint("TOPLEFT", sessionBar, "TOPLEFT", 8, -6)
+  sessionTitle:SetText("Session Controls")
+
+  local sessionStatus = sessionBar:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  sessionStatus:SetPoint("RIGHT", sessionBar, "RIGHT", -10, 0)
+  sessionStatus:SetJustifyH("RIGHT")
+  sessionStatus:SetWidth(240)
+  sessionStatus:SetText("Session Status: INACTIVE")
+
+  local buttonRow = CreateFrame("Frame", nil, sessionBar)
+  buttonRow:SetPoint("BOTTOMLEFT", sessionBar, "BOTTOMLEFT", 8, 6)
+  buttonRow:SetPoint("RIGHT", sessionStatus, "LEFT", -8, 0)
+  buttonRow:SetHeight(ADMIN_BUTTON_HEIGHT)
+
+  local function CreateSessionButton(label, width, onClick)
+    local button = CreateFrame("Button", nil, buttonRow, "UIPanelButtonTemplate")
+    button:SetSize(width, ADMIN_BUTTON_HEIGHT)
+    button:SetText(label)
+    button:SetScript("OnClick", onClick)
+    return button
   end
 
-  local columns = AceGUI:Create("SimpleGroup")
-  columns:SetFullWidth(true)
-  columns:SetFullHeight(true)
-  columns:SetLayout("Flow")
-  frame:AddChild(columns)
-
-  local rightColumn = AceGUI:Create("ScrollFrame")
-  rightColumn:SetFullWidth(true)
-  rightColumn:SetFullHeight(true)
-  rightColumn:SetLayout("List")
-  columns:AddChild(rightColumn)
-
-  local sessionGroup = AceGUI:Create("SimpleGroup")
-  sessionGroup:SetFullWidth(true)
-  sessionGroup:SetLayout("Flow")
-
-  local sessionLabel = AceGUI:Create("Heading")
-  sessionLabel:SetText("Session Controls")
-  sessionLabel:SetFullWidth(true)
-  sessionGroup:AddChild(sessionLabel)
-
-  local startBtn = AceGUI:Create("Button")
-  startBtn:SetText("Start Session")
-  startBtn:SetWidth(150)
-  startBtn:SetCallback("OnClick", function()
+  local sessionButtons = {}
+  sessionButtons[#sessionButtons + 1] = CreateSessionButton("Start Session", 110, function()
     TestUI:StartTestSession()
     TestUI:RefreshTestPanel()
   end)
-  sessionGroup:AddChild(startBtn)
-
-  local endBtn = AceGUI:Create("Button")
-  endBtn:SetText("End Session")
-  endBtn:SetWidth(150)
-  endBtn:SetCallback("OnClick", function()
+  sessionButtons[#sessionButtons + 1] = CreateSessionButton("End Session", 110, function()
     TestUI:EndTestSession()
     TestUI:RefreshTestPanel()
   end)
-  sessionGroup:AddChild(endBtn)
 
-  local historyBtn = AceGUI:Create("Button")
-  historyBtn:SetText("Test History")
-  historyBtn:SetWidth(150)
-  historyBtn:SetCallback("OnClick", function()
-    TestUI:ToggleTestHistory()
-  end)
-  sessionGroup:AddChild(historyBtn)
-
-  local graphsBtn = AceGUI:Create("Button")
-  graphsBtn:SetText("Experimental Graphs")
-  graphsBtn:SetWidth(150)
-  graphsBtn:SetCallback("OnClick", function()
-    TestUI:ToggleTestGraphs()
-  end)
-  sessionGroup:AddChild(graphsBtn)
-
-  local queueEditBtn = AceGUI:Create("Button")
-  queueEditBtn:SetWidth(150)
+  local queueEditBtn = CreateFrame("Button", nil, buttonRow, "UIPanelButtonTemplate")
+  queueEditBtn:SetSize(120, ADMIN_BUTTON_HEIGHT)
   local function updateQueueEditLabel()
-    queueEditBtn:SetText(TestUI.queueEditEnabled and "Queue Edit: On" or "Queue Edit: Off")
+    queueEditBtn:SetText(TestUI.queueEditEnabled and "Edit Roster: On" or "Edit Roster: Off")
   end
   updateQueueEditLabel()
-  queueEditBtn:SetCallback("OnClick", function()
+  queueEditBtn:SetScript("OnClick", function()
     TestUI.queueEditEnabled = not TestUI.queueEditEnabled
+    if GLD.SetRosterEditEnabled then
+      GLD:SetRosterEditEnabled(TestUI.queueEditEnabled)
+    else
+      GLD.editRosterEnabled = TestUI.queueEditEnabled
+    end
     updateQueueEditLabel()
     TestUI:RefreshTestPanel()
+    if GLD.UI and GLD.UI.RefreshMain then
+      GLD.UI:RefreshMain()
+    end
   end)
-  sessionGroup:AddChild(queueEditBtn)
+  sessionButtons[#sessionButtons + 1] = queueEditBtn
 
-  local sessionStatus = AceGUI:Create("Label")
-  sessionStatus:SetFullWidth(true)
-  sessionStatus:SetText("Session Status: INACTIVE")
-  sessionGroup:AddChild(sessionStatus)
-
-  rightColumn:AddChild(sessionGroup)
-
-  local rosterLabel = AceGUI:Create("Heading")
-  rosterLabel:SetText("Player Management")
-  rosterLabel:SetFullWidth(true)
-  rightColumn:AddChild(rosterLabel)
-
-  local rosterScroll = AceGUI:Create("ScrollFrame")
-  rosterScroll:SetFullWidth(true)
-  rosterScroll:SetHeight(180)
-  rosterScroll:SetLayout("Flow")
-  rightColumn:AddChild(rosterScroll)
-
-  local voteGroup = AceGUI:Create("InlineGroup")
-  voteGroup:SetTitle("Test Vote Selection")
-  voteGroup:SetFullWidth(true)
-  voteGroup:SetHeight(170)
-  voteGroup:SetLayout("Fill")
-
-  local voteScroll = AceGUI:Create("ScrollFrame")
-  voteScroll:SetFullWidth(true)
-  voteScroll:SetHeight(160)
-  voteScroll:SetLayout("Flow")
-  voteGroup:AddChild(voteScroll)
-  rightColumn:AddChild(voteGroup)
-
-  local resultsGroup = AceGUI:Create("InlineGroup")
-  resultsGroup:SetTitle("Loot Distribution (Test)")
-  resultsGroup:SetFullWidth(true)
-  resultsGroup:SetHeight(170)
-  resultsGroup:SetLayout("Fill")
-
-  local resultsScroll = AceGUI:Create("ScrollFrame")
-  resultsScroll:SetFullWidth(true)
-  resultsScroll:SetHeight(140)
-  resultsScroll:SetLayout("Flow")
-  resultsGroup:AddChild(resultsScroll)
-  rightColumn:AddChild(resultsGroup)
-
-  local lootFrame = AceGUI:Create("Frame")
-  lootFrame:SetTitle("Test Loot Choices")
-  lootFrame:SetStatusText("Loot")
-  lootFrame:SetWidth(320)
-  lootFrame:SetHeight(600)
-  lootFrame:SetLayout("Flow")
-  lootFrame:EnableResize(false)
-  if lootFrame.frame then
-    lootFrame.frame:ClearAllPoints()
-    lootFrame.frame:SetPoint("RIGHT", frame.frame, "LEFT", -10, 0)
+  local previous = nil
+  for _, button in ipairs(sessionButtons) do
+    if not previous then
+      button:SetPoint("LEFT", buttonRow, "LEFT", 0, 0)
+    else
+      button:SetPoint("LEFT", previous, "RIGHT", 6, 0)
+    end
+    previous = button
   end
 
-  lootFrame:SetCallback("OnClose", function(widget)
-    widget:Hide()
-    TestUI:UpdateLootFrameToggle()
+  local demoLootButton = CreateFrame("Button", nil, sessionBar, "UIPanelButtonTemplate")
+  demoLootButton:SetSize(220, ADMIN_BUTTON_HEIGHT)
+  demoLootButton:SetText("Show Example Loot/Pending Window")
+  demoLootButton:SetPoint("BOTTOMRIGHT", sessionBar, "BOTTOMRIGHT", -10, 6)
+  demoLootButton:SetScript("OnClick", function()
+    if GLD.UI and GLD.UI.ShowLootWindowDemo then
+      GLD.UI:ShowLootWindowDemo()
+    end
   end)
+  if not GLD:IsAdmin() then
+    demoLootButton:Hide()
+  end
+
+  local playerPanel = CreateFrame("Frame", nil, adminPanel, "InsetFrameTemplate3")
+  playerPanel:SetPoint("TOPLEFT", sessionBar, "BOTTOMLEFT", 0, -ADMIN_SECTION_PADDING)
+  playerPanel:SetPoint("TOPRIGHT", sessionBar, "BOTTOMRIGHT", 0, -ADMIN_SECTION_PADDING)
+  playerPanel:SetPoint("BOTTOMLEFT", adminPanel, "BOTTOMLEFT", 0, 0)
+  playerPanel:SetPoint("BOTTOMRIGHT", adminPanel, "BOTTOMRIGHT", 0, 0)
+
+  local testDataPanel = CreateFrame("Frame", nil, dataPanel, "InsetFrameTemplate3")
+  testDataPanel:SetPoint("TOPLEFT", dataPanel, "TOPLEFT", 0, 0)
+  testDataPanel:SetPoint("TOPRIGHT", dataPanel, "TOPRIGHT", 0, 0)
+  testDataPanel:SetHeight(180)
+
+  local votePanel = CreateFrame("Frame", nil, dataPanel, "InsetFrameTemplate3")
+  votePanel:SetHeight(110)
+  votePanel:SetPoint("TOPLEFT", testDataPanel, "BOTTOMLEFT", 0, -ADMIN_SECTION_PADDING)
+  votePanel:SetPoint("TOPRIGHT", testDataPanel, "BOTTOMRIGHT", 0, -ADMIN_SECTION_PADDING)
+
+  local resultsPanel = CreateFrame("Frame", nil, dataPanel, "InsetFrameTemplate3")
+  resultsPanel:SetPoint("TOPLEFT", votePanel, "BOTTOMLEFT", 0, -ADMIN_SECTION_PADDING)
+  resultsPanel:SetPoint("TOPRIGHT", votePanel, "BOTTOMRIGHT", 0, -ADMIN_SECTION_PADDING)
+  resultsPanel:SetPoint("BOTTOMLEFT", dataPanel, "BOTTOMLEFT", 0, 0)
+  resultsPanel:SetPoint("BOTTOMRIGHT", dataPanel, "BOTTOMRIGHT", 0, 0)
+
+  local historyInset = CreateFrame("Frame", nil, historyPanel, "InsetFrameTemplate3")
+  historyInset:SetPoint("TOPLEFT", historyPanel, "TOPLEFT", 0, 0)
+  historyInset:SetPoint("BOTTOMRIGHT", historyPanel, "BOTTOMRIGHT", 0, 0)
+
+  local historyTitle = historyInset:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  historyTitle:SetPoint("TOPLEFT", historyInset, "TOPLEFT", 8, -6)
+  historyTitle:SetText("Test History")
+
+  local historyControls = CreateFrame("Frame", nil, historyInset)
+  historyControls:SetPoint("TOPRIGHT", historyInset, "TOPRIGHT", -8, -6)
+  historyControls:SetHeight(ADMIN_BUTTON_HEIGHT)
+
+  local graphsBtn = CreateFrame("Button", nil, historyControls, "UIPanelButtonTemplate")
+  graphsBtn:SetSize(150, ADMIN_BUTTON_HEIGHT)
+  graphsBtn:SetText("Experimental Graphs")
+  graphsBtn:SetPoint("RIGHT", historyControls, "RIGHT", 0, 0)
+  graphsBtn:SetScript("OnClick", function()
+    TestUI:ToggleTestGraphs()
+  end)
+
+  self:CreateTestHistoryPanel(historyInset)
+
+  local playerTitle = playerPanel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  playerTitle:SetPoint("TOPLEFT", playerPanel, "TOPLEFT", 8, -6)
+  playerTitle:SetText("Player Management")
+
+  self.playerColumns = CopyColumnDefs(PLAYER_COLUMNS)
+  UpdateColumnOffsets(self.playerColumns, 4)
+  self.playerColumnMap = BuildColumnMap(self.playerColumns)
+
+  local playerHeaderRow = CreateFrame("Frame", nil, playerPanel)
+  playerHeaderRow:SetHeight(ADMIN_HEADER_HEIGHT)
+  playerHeaderRow:SetPoint("TOPLEFT", playerPanel, "TOPLEFT", 6, -24)
+  playerHeaderRow:SetPoint("TOPRIGHT", playerPanel, "TOPRIGHT", -ADMIN_SCROLLBAR_OFFSET, -24)
+
+  self.playerHeaderCells = {}
+  for _, col in ipairs(self.playerColumns) do
+    local cell = CreateFrame("Frame", nil, playerHeaderRow, "BackdropTemplate")
+    cell:SetSize(col.width, ADMIN_HEADER_HEIGHT)
+    cell:SetPoint("LEFT", playerHeaderRow, "LEFT", col.x, 0)
+    ApplyHeaderCellStyle(cell)
+    local text = cell:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+    text:SetPoint("CENTER", cell, "CENTER", 0, 0)
+    text:SetText(col.label)
+    self.playerHeaderCells[col.key] = cell
+  end
+
+  local playerScrollBox = CreateFrame("Frame", nil, playerPanel, "WowScrollBoxList")
+  playerScrollBox:SetPoint("TOPLEFT", playerHeaderRow, "BOTTOMLEFT", 0, -2)
+  playerScrollBox:SetPoint("BOTTOMRIGHT", playerPanel, "BOTTOMRIGHT", -ADMIN_SCROLLBAR_OFFSET, 6)
+
+  local playerScrollBar = CreateFrame("EventFrame", nil, playerPanel, "MinimalScrollBar")
+  playerScrollBar:SetPoint("TOPLEFT", playerHeaderRow, "TOPRIGHT", 4, 0)
+  playerScrollBar:SetPoint("BOTTOMLEFT", playerScrollBox, "BOTTOMRIGHT", 4, 0)
+
+  local playerView = CreateScrollBoxListLinearView()
+  playerView:SetElementInitializer("GLDRosterRowTemplate", function(row, elementData)
+    TestUI:InitializePlayerRow(row)
+    TestUI:PopulatePlayerRow(row, elementData)
+  end)
+  playerView:SetElementExtent(ADMIN_ROW_HEIGHT)
+  ScrollUtil.InitScrollBoxListWithScrollBar(playerScrollBox, playerScrollBar, playerView)
+
+  local testDataTitle = testDataPanel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  testDataTitle:SetPoint("TOPLEFT", testDataPanel, "TOPLEFT", 8, -6)
+  testDataTitle:SetText("Test DB Players")
+
+  local testDataControls = CreateFrame("Frame", nil, testDataPanel)
+  testDataControls:SetPoint("TOPRIGHT", testDataPanel, "TOPRIGHT", -8, -6)
+  testDataControls:SetHeight(ADMIN_BUTTON_HEIGHT)
+
+  local testDataAddBtn = CreateFrame("Button", nil, testDataControls, "UIPanelButtonTemplate")
+  testDataAddBtn:SetSize(90, ADMIN_BUTTON_HEIGHT)
+  testDataAddBtn:SetText("Add Player")
+  testDataAddBtn:SetPoint("RIGHT", testDataControls, "RIGHT", 0, 0)
+  testDataAddBtn:SetScript("OnClick", function()
+    TestUI:ShowAddTestPlayerDialog()
+  end)
+
+  local testDataResetBtn = CreateFrame("Button", nil, testDataControls, "UIPanelButtonTemplate")
+  testDataResetBtn:SetSize(110, ADMIN_BUTTON_HEIGHT)
+  testDataResetBtn:SetText("Reset Test DB")
+  testDataResetBtn:SetPoint("RIGHT", testDataAddBtn, "LEFT", -6, 0)
+  testDataResetBtn:SetScript("OnClick", function()
+    if GLD.ResetTestDB then
+      GLD:ResetTestDB()
+      TestUI:ShowTestDataMessage("Test DB reset.", false)
+      TestUI:RefreshTestPanel()
+      TestUI:RefreshTestDataPanel()
+    end
+  end)
+
+  local testDataStatus = testDataPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  testDataStatus:SetPoint("TOPLEFT", testDataTitle, "BOTTOMLEFT", 0, -2)
+  testDataStatus:SetPoint("RIGHT", testDataPanel, "RIGHT", -12, 0)
+  testDataStatus:SetJustifyH("LEFT")
+  testDataStatus:SetText("")
+
+  self.testDataColumns = CopyColumnDefs(TEST_DATA_COLUMNS)
+  UpdateColumnOffsets(self.testDataColumns, 4)
+  self.testDataColumnMap = BuildColumnMap(self.testDataColumns)
+
+  local testDataHeaderRow = CreateFrame("Frame", nil, testDataPanel)
+  testDataHeaderRow:SetHeight(ADMIN_HEADER_HEIGHT)
+  testDataHeaderRow:SetPoint("TOPLEFT", testDataPanel, "TOPLEFT", 6, -40)
+  testDataHeaderRow:SetPoint("TOPRIGHT", testDataPanel, "TOPRIGHT", -ADMIN_SCROLLBAR_OFFSET, -40)
+
+  for _, col in ipairs(self.testDataColumns) do
+    local cell = CreateFrame("Frame", nil, testDataHeaderRow, "BackdropTemplate")
+    cell:SetSize(col.width, ADMIN_HEADER_HEIGHT)
+    cell:SetPoint("LEFT", testDataHeaderRow, "LEFT", col.x, 0)
+    ApplyHeaderCellStyle(cell)
+    local text = cell:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+    text:SetPoint("CENTER", cell, "CENTER", 0, 0)
+    text:SetText(col.label)
+  end
+
+  local testDataScrollBox = CreateFrame("Frame", nil, testDataPanel, "WowScrollBoxList")
+  testDataScrollBox:SetPoint("TOPLEFT", testDataHeaderRow, "BOTTOMLEFT", 0, -2)
+  testDataScrollBox:SetPoint("BOTTOMRIGHT", testDataPanel, "BOTTOMRIGHT", -ADMIN_SCROLLBAR_OFFSET, 6)
+
+  local testDataScrollBar = CreateFrame("EventFrame", nil, testDataPanel, "MinimalScrollBar")
+  testDataScrollBar:SetPoint("TOPLEFT", testDataHeaderRow, "TOPRIGHT", 4, 0)
+  testDataScrollBar:SetPoint("BOTTOMLEFT", testDataScrollBox, "BOTTOMRIGHT", 4, 0)
+
+  local testDataView = CreateScrollBoxListLinearView()
+  testDataView:SetElementInitializer("GLDRosterRowTemplate", function(row, elementData)
+    TestUI:InitializeTestDataRow(row)
+    TestUI:PopulateTestDataRow(row, elementData)
+  end)
+  testDataView:SetElementExtent(ADMIN_ROW_HEIGHT)
+  ScrollUtil.InitScrollBoxListWithScrollBar(testDataScrollBox, testDataScrollBar, testDataView)
+
+  local voteTitle = votePanel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  voteTitle:SetPoint("TOPLEFT", votePanel, "TOPLEFT", 8, -6)
+  voteTitle:SetText("Test Vote Selection")
+
+  local voteResetBtn = CreateFrame("Button", nil, votePanel, "UIPanelButtonTemplate")
+  voteResetBtn:SetSize(110, ADMIN_BUTTON_HEIGHT)
+  voteResetBtn:SetPoint("TOPLEFT", votePanel, "TOPLEFT", 8, -24)
+  voteResetBtn:SetText("Reset Votes")
+  voteResetBtn:SetScript("OnClick", function()
+    TestUI:ResetTestVotes()
+    TestUI:RefreshVotePanel()
+    TestUI:RefreshResultsPanel()
+  end)
+
+  local voteStatusLabel = votePanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  voteStatusLabel:SetPoint("TOPLEFT", voteResetBtn, "BOTTOMLEFT", 0, -4)
+  voteStatusLabel:SetPoint("RIGHT", votePanel, "RIGHT", -ADMIN_SCROLLBAR_OFFSET, 0)
+  voteStatusLabel:SetJustifyH("LEFT")
+  voteStatusLabel:SetText("Test vote panel active")
+
+  local votePlayerLabel = votePanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  votePlayerLabel:SetPoint("TOPLEFT", voteStatusLabel, "BOTTOMLEFT", 0, -2)
+  votePlayerLabel:SetPoint("RIGHT", votePanel, "RIGHT", -ADMIN_SCROLLBAR_OFFSET, 0)
+  votePlayerLabel:SetJustifyH("LEFT")
+
+  local voteButtonsRow = CreateFrame("Frame", nil, votePanel)
+  voteButtonsRow:SetPoint("BOTTOMLEFT", votePanel, "BOTTOMLEFT", 8, 6)
+  voteButtonsRow:SetHeight(ADMIN_BUTTON_HEIGHT)
+
+  local voteButtons = {}
+  local function CreateVoteButton(label)
+    local button = CreateFrame("Button", nil, voteButtonsRow, "UIPanelButtonTemplate")
+    button:SetSize(70, ADMIN_BUTTON_HEIGHT)
+    button:SetText(label)
+    return button
+  end
+  voteButtons.need = CreateVoteButton("Need")
+  voteButtons.greed = CreateVoteButton("Greed")
+  voteButtons.mog = CreateVoteButton("Mog")
+  voteButtons.pass = CreateVoteButton("Pass")
+
+  local prevVote = nil
+  for _, button in ipairs({ voteButtons.need, voteButtons.greed, voteButtons.mog, voteButtons.pass }) do
+    if not prevVote then
+      button:SetPoint("LEFT", voteButtonsRow, "LEFT", 0, 0)
+    else
+      button:SetPoint("LEFT", prevVote, "RIGHT", 6, 0)
+    end
+    prevVote = button
+  end
+
+  local resultsTitle = resultsPanel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  resultsTitle:SetPoint("TOPLEFT", resultsPanel, "TOPLEFT", 8, -6)
+  resultsTitle:SetText("Loot Distribution (Test)")
+
+  local resultsControls = CreateFrame("Frame", nil, resultsPanel)
+  resultsControls:ClearAllPoints()
+  resultsControls:SetPoint("LEFT", resultsTitle, "RIGHT", 12, 0)
+  resultsControls:SetPoint("TOP", resultsTitle, "TOP", 0, 0)
+  resultsControls:SetPoint("RIGHT", resultsPanel, "RIGHT", -12, 0)
+  resultsControls:SetHeight(ADMIN_BUTTON_HEIGHT)
+
+  local resultsAbsentBtn = CreateFrame("Button", nil, resultsControls, "UIPanelButtonTemplate")
+  resultsAbsentBtn:SetSize(140, ADMIN_BUTTON_HEIGHT)
+  resultsAbsentBtn:SetText("Set Party Absent")
+  resultsAbsentBtn:SetScript("OnClick", function()
+    local activeVoters = GetActiveVoters()
+    for _, entry in ipairs(activeVoters or {}) do
+      local name, realm = NS:SplitNameRealm(entry.name)
+      local player = GetOrCreateTestPlayer(name, realm, entry.class)
+      if player then
+        SetTestAttendance(player, "ABSENT")
+      end
+    end
+    TestUI:RefreshTestPanel()
+  end)
+
+  local resultsRandomBtn = CreateFrame("Button", nil, resultsControls, "UIPanelButtonTemplate")
+  resultsRandomBtn:SetSize(200, ADMIN_BUTTON_HEIGHT)
+  resultsRandomBtn:SetText("Randomize Queue Positions")
+  resultsRandomBtn:SetPoint("LEFT", resultsAbsentBtn, "RIGHT", 6, 0)
+  resultsRandomBtn:SetScript("OnClick", function()
+    local activeVoters = GetActiveVoters()
+    local players = {}
+    for _, entry in ipairs(activeVoters or {}) do
+      local name, realm = NS:SplitNameRealm(entry.name)
+      local player = GetOrCreateTestPlayer(name, realm, entry.class)
+      if player then
+        players[#players + 1] = player
+      end
+    end
+    local count = #players
+    if count == 0 then
+      return
+    end
+    local positions = {}
+    for i = 1, count do
+      positions[i] = i
+    end
+    for i = count, 2, -1 do
+      local j = math.random(i)
+      positions[i], positions[j] = positions[j], positions[i]
+    end
+    for i, player in ipairs(players) do
+      if player.attendance == "ABSENT" then
+        player.savedPos = positions[i]
+        player.queuePos = nil
+      else
+        player.queuePos = positions[i]
+        if not player.savedPos then
+          player.savedPos = 0
+        end
+      end
+    end
+    TestUI:RefreshTestPanel()
+  end)
+
+  local resultsResetSoloBtn = CreateFrame("Button", nil, resultsControls, "UIPanelButtonTemplate")
+  resultsResetSoloBtn:SetSize(170, ADMIN_BUTTON_HEIGHT)
+  resultsResetSoloBtn:SetText("Reset Solo Test Votes")
+  resultsResetSoloBtn:SetPoint("LEFT", resultsRandomBtn, "RIGHT", 6, 0)
+  resultsResetSoloBtn:SetScript("OnClick", function()
+    TestUI:ResetSoloTestVotes()
+  end)
+
+  local resultsSummaryLabel = resultsPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  resultsSummaryLabel:SetPoint("TOPLEFT", resultsControls, "BOTTOMLEFT", 0, -4)
+  resultsSummaryLabel:SetPoint("RIGHT", resultsPanel, "RIGHT", -ADMIN_SCROLLBAR_OFFSET, 0)
+  resultsSummaryLabel:SetJustifyH("LEFT")
+
+  local resultsWinnerLabel = resultsPanel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  resultsWinnerLabel:SetPoint("TOPLEFT", resultsSummaryLabel, "BOTTOMLEFT", 0, -2)
+  resultsWinnerLabel:SetPoint("RIGHT", resultsPanel, "RIGHT", -ADMIN_SCROLLBAR_OFFSET, 0)
+  resultsWinnerLabel:SetJustifyH("LEFT")
+  resultsWinnerLabel:SetText("Winner: (pending votes)")
+
+  self.resultsColumns = CopyColumnDefs(RESULT_COLUMNS)
+  UpdateColumnOffsets(self.resultsColumns, 4)
+  self.resultsColumnMap = BuildColumnMap(self.resultsColumns)
+
+  local resultsTableContainer = CreateFrame("Frame", nil, resultsPanel)
+  local titleHeight = resultsTitle.GetStringHeight and resultsTitle:GetStringHeight() or resultsTitle:GetHeight() or 0
+  local titleOffsetY = -6 - titleHeight - 8
+  resultsTableContainer:ClearAllPoints()
+  resultsTableContainer:SetPoint("TOPLEFT", resultsTitle, "BOTTOMLEFT", 0, -8)
+  resultsTableContainer:SetPoint("TOPRIGHT", resultsPanel, "TOPRIGHT", -12, titleOffsetY)
+  resultsTableContainer:SetPoint("BOTTOMLEFT", resultsPanel, "BOTTOMLEFT", 12, 12)
+  resultsTableContainer:SetPoint("BOTTOMRIGHT", resultsPanel, "BOTTOMRIGHT", -12, 12)
+
+  resultsSummaryLabel:SetParent(resultsTableContainer)
+  resultsSummaryLabel:ClearAllPoints()
+  resultsSummaryLabel:SetPoint("TOPLEFT", resultsTableContainer, "TOPLEFT", 6, -6)
+  resultsSummaryLabel:SetPoint("RIGHT", resultsTableContainer, "RIGHT", -ADMIN_SCROLLBAR_OFFSET, 0)
+
+  resultsWinnerLabel:SetParent(resultsTableContainer)
+  resultsWinnerLabel:ClearAllPoints()
+  resultsWinnerLabel:SetPoint("TOPLEFT", resultsSummaryLabel, "BOTTOMLEFT", 0, -2)
+  resultsWinnerLabel:SetPoint("RIGHT", resultsTableContainer, "RIGHT", -ADMIN_SCROLLBAR_OFFSET, 0)
+
+  local resultsHeaderRow = CreateFrame("Frame", nil, resultsTableContainer)
+  resultsHeaderRow:SetHeight(ADMIN_HEADER_HEIGHT)
+  resultsHeaderRow:ClearAllPoints()
+  resultsHeaderRow:SetPoint("LEFT", resultsTableContainer, "LEFT", 6, 0)
+  resultsHeaderRow:SetPoint("RIGHT", resultsTableContainer, "RIGHT", -ADMIN_SCROLLBAR_OFFSET, 0)
+  resultsHeaderRow:SetPoint("TOP", resultsWinnerLabel, "BOTTOM", 0, -6)
+
+  for _, col in ipairs(self.resultsColumns) do
+    local cell = CreateFrame("Frame", nil, resultsHeaderRow, "BackdropTemplate")
+    cell:SetSize(col.width, ADMIN_HEADER_HEIGHT)
+    cell:SetPoint("LEFT", resultsHeaderRow, "LEFT", col.x, 0)
+    ApplyHeaderCellStyle(cell)
+    local text = cell:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+    text:SetPoint("CENTER", cell, "CENTER", 0, 0)
+    text:SetText(col.label)
+  end
+
+  local resultsScrollBox = CreateFrame("Frame", nil, resultsTableContainer, "WowScrollBoxList")
+  resultsScrollBox:ClearAllPoints()
+  resultsScrollBox:SetPoint("TOPLEFT", resultsHeaderRow, "BOTTOMLEFT", 0, -2)
+  resultsScrollBox:SetPoint("BOTTOMRIGHT", resultsTableContainer, "BOTTOMRIGHT", -ADMIN_SCROLLBAR_OFFSET, 6)
+
+  local resultsScrollBar = CreateFrame("EventFrame", nil, resultsTableContainer, "MinimalScrollBar")
+  resultsScrollBar:ClearAllPoints()
+  resultsScrollBar:SetPoint("TOPLEFT", resultsHeaderRow, "TOPRIGHT", 4, 0)
+  resultsScrollBar:SetPoint("BOTTOMLEFT", resultsScrollBox, "BOTTOMRIGHT", 4, 0)
+
+  local resultsView = CreateScrollBoxListLinearView()
+  resultsView:SetElementInitializer("GLDRosterRowTemplate", function(row, elementData)
+    TestUI:InitializeResultsRow(row)
+    TestUI:PopulateResultsRow(row, elementData)
+  end)
+  resultsView:SetElementExtent(ADMIN_ROW_HEIGHT)
+  ScrollUtil.InitScrollBoxListWithScrollBar(resultsScrollBox, resultsScrollBar, resultsView)
+
+  local lootControls = CreateFrame("Frame", nil, lootPanel, "InsetFrameTemplate3")
+  lootControls:SetPoint("TOPLEFT", lootPanel, "TOPLEFT", 0, 0)
+  lootControls:SetPoint("TOPRIGHT", lootPanel, "TOPRIGHT", 0, 0)
+  lootControls:SetHeight(340)
+
+  local lootControlsTitle = lootControls:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  lootControlsTitle:SetPoint("TOPLEFT", lootControls, "TOPLEFT", 8, -6)
+  lootControlsTitle:SetText("Test Loot Choices")
 
   local instanceSelect = AceGUI:Create("Dropdown")
   instanceSelect:SetLabel("Raid")
   instanceSelect:SetWidth(260)
-  lootFrame:AddChild(instanceSelect)
+  instanceSelect.frame:SetParent(lootControls)
+  instanceSelect.frame:SetPoint("TOPLEFT", lootControls, "TOPLEFT", 8, -24)
+  instanceSelect.frame:Show()
 
   local encounterSelect = AceGUI:Create("Dropdown")
   encounterSelect:SetLabel("Encounter")
   encounterSelect:SetWidth(260)
-  lootFrame:AddChild(encounterSelect)
+  encounterSelect.frame:SetParent(lootControls)
+  encounterSelect.frame:SetPoint("TOPLEFT", instanceSelect.frame, "BOTTOMLEFT", 0, -6)
+  encounterSelect.frame:Show()
 
   local ejStatusLabel = AceGUI:Create("Label")
   ejStatusLabel:SetFullWidth(true)
   ejStatusLabel:SetText("Encounter Journal: idle")
-  lootFrame:AddChild(ejStatusLabel)
+  ejStatusLabel.frame:SetParent(lootControls)
+  ejStatusLabel.frame:SetPoint("TOPLEFT", encounterSelect.frame, "BOTTOMLEFT", 0, -6)
+  ejStatusLabel.frame:Show()
 
   local ejReloadBtn = AceGUI:Create("Button")
   ejReloadBtn:SetText("Reload Encounter Journal")
   ejReloadBtn:SetWidth(200)
+  ejReloadBtn.frame:SetParent(lootControls)
+  ejReloadBtn.frame:SetPoint("TOPLEFT", ejStatusLabel.frame, "BOTTOMLEFT", 0, -6)
+  ejReloadBtn.frame:Show()
   ejReloadBtn:SetCallback("OnClick", function()
     TestUI:SetEJStatus("Encounter Journal: reloading...")
     TestUI:RefreshInstanceList()
   end)
-  lootFrame:AddChild(ejReloadBtn)
 
   local loadLootBtn = AceGUI:Create("Button")
   loadLootBtn:SetText("Load Loot")
   loadLootBtn:SetWidth(120)
-  lootFrame:AddChild(loadLootBtn)
+  loadLootBtn.frame:SetParent(lootControls)
+  loadLootBtn.frame:SetPoint("LEFT", ejReloadBtn.frame, "RIGHT", 6, 0)
+  loadLootBtn.frame:Show()
 
   local itemLinkInput = AceGUI:Create("EditBox")
   itemLinkInput:SetLabel("Item Link")
   itemLinkInput:SetWidth(260)
   itemLinkInput:SetText("item:19345")
-  lootFrame:AddChild(itemLinkInput)
+  itemLinkInput.frame:SetParent(lootControls)
+  itemLinkInput.frame:SetPoint("TOPLEFT", ejReloadBtn.frame, "BOTTOMLEFT", 0, -10)
+  itemLinkInput.frame:Show()
 
   local itemArmorLabel = AceGUI:Create("Label")
   itemArmorLabel:SetFullWidth(true)
   itemArmorLabel:SetText("Armor Type: -")
-  lootFrame:AddChild(itemArmorLabel)
+  itemArmorLabel.frame:SetParent(lootControls)
+  itemArmorLabel.frame:SetPoint("TOPLEFT", itemLinkInput.frame, "BOTTOMLEFT", 0, -4)
+  itemArmorLabel.frame:Show()
 
   local itemLinkInput2 = AceGUI:Create("EditBox")
   itemLinkInput2:SetLabel("Item Link 2")
   itemLinkInput2:SetWidth(260)
-  lootFrame:AddChild(itemLinkInput2)
+  itemLinkInput2.frame:SetParent(lootControls)
+  itemLinkInput2.frame:SetPoint("TOPLEFT", itemArmorLabel.frame, "BOTTOMLEFT", 0, -6)
+  itemLinkInput2.frame:Show()
 
   local itemArmorLabel2 = AceGUI:Create("Label")
   itemArmorLabel2:SetFullWidth(true)
   itemArmorLabel2:SetText("Armor Type 2: -")
-  lootFrame:AddChild(itemArmorLabel2)
+  itemArmorLabel2.frame:SetParent(lootControls)
+  itemArmorLabel2.frame:SetPoint("TOPLEFT", itemLinkInput2.frame, "BOTTOMLEFT", 0, -4)
+  itemArmorLabel2.frame:Show()
 
   local dropBtn = AceGUI:Create("Button")
   dropBtn:SetText("Simulate Item 1")
-  dropBtn:SetWidth(150)
+  dropBtn:SetWidth(140)
+  dropBtn.frame:SetParent(lootControls)
+  dropBtn.frame:ClearAllPoints()
+  dropBtn.frame:SetPoint("TOPLEFT", itemLinkInput.frame, "TOPRIGHT", 24, 0)
+  dropBtn.frame:Show()
   dropBtn:SetCallback("OnClick", function()
     TestUI:SimulateLootRoll(itemLinkInput:GetText())
   end)
-  lootFrame:AddChild(dropBtn)
 
   local dropBtn2 = AceGUI:Create("Button")
   dropBtn2:SetText("Simulate Item 2")
-  dropBtn2:SetWidth(150)
+  dropBtn2:SetWidth(140)
+  dropBtn2.frame:SetParent(lootControls)
+  dropBtn2.frame:ClearAllPoints()
+  dropBtn2.frame:SetPoint("TOPLEFT", dropBtn.frame, "BOTTOMLEFT", 0, -8)
+  dropBtn2.frame:Show()
   dropBtn2:SetCallback("OnClick", function()
     TestUI:SimulateLootRoll(itemLinkInput2:GetText())
   end)
-  lootFrame:AddChild(dropBtn2)
 
   local dropBothBtn = AceGUI:Create("Button")
   dropBothBtn:SetText("Simulate Both")
-  dropBothBtn:SetWidth(150)
+  dropBothBtn:SetWidth(140)
+  dropBothBtn.frame:SetParent(lootControls)
+  dropBothBtn.frame:ClearAllPoints()
+  dropBothBtn.frame:SetPoint("TOPLEFT", dropBtn2.frame, "BOTTOMLEFT", 0, -8)
+  dropBothBtn.frame:Show()
   dropBothBtn:SetCallback("OnClick", function()
     TestUI:SimulateLootRoll(itemLinkInput:GetText())
     TestUI:SimulateLootRoll(itemLinkInput2:GetText())
   end)
-  lootFrame:AddChild(dropBothBtn)
 
   local pendingBtn = AceGUI:Create("Button")
-  pendingBtn:SetText("Show Pending Votes UI")
-  pendingBtn:SetWidth(180)
+  pendingBtn:SetText("Show Example Loot/Pending Window")
+  pendingBtn:SetWidth(220)
+  pendingBtn.frame:SetParent(lootControls)
+  pendingBtn.frame:ClearAllPoints()
+  pendingBtn.frame:SetPoint("TOPLEFT", dropBothBtn.frame, "BOTTOMLEFT", 0, -10)
   pendingBtn:SetCallback("OnClick", function()
-    if GLD.UI then
-      if GLD.UI.TogglePendingFrame then
-        GLD.UI:TogglePendingFrame()
-      end
+    if GLD.UI and GLD.UI.ShowLootWindowDemo then
+      GLD.UI:ShowLootWindowDemo()
     end
   end)
-  lootFrame:AddChild(pendingBtn)
+  pendingBtn.frame:SetShown(GLD:IsAdmin())
 
-  local lootListGroup = AceGUI:Create("InlineGroup")
-  lootListGroup:SetTitle("Encounter Loot")
-  lootListGroup:SetFullWidth(true)
-  lootListGroup:SetLayout("Fill")
+  local lootListPanel = CreateFrame("Frame", nil, lootPanel, "InsetFrameTemplate3")
+  lootListPanel:SetPoint("TOPLEFT", lootControls, "BOTTOMLEFT", 0, -ADMIN_SECTION_PADDING)
+  lootListPanel:SetPoint("TOPRIGHT", lootControls, "BOTTOMRIGHT", 0, -ADMIN_SECTION_PADDING)
+  lootListPanel:SetPoint("BOTTOMLEFT", lootPanel, "BOTTOMLEFT", 0, 0)
+  lootListPanel:SetPoint("BOTTOMRIGHT", lootPanel, "BOTTOMRIGHT", 0, 0)
 
-  local lootListSpacer = AceGUI:Create("SimpleGroup")
-  lootListSpacer:SetFullWidth(true)
-  lootListSpacer:SetHeight(5)
+  local lootListTitle = lootListPanel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  lootListTitle:SetPoint("TOPLEFT", lootListPanel, "TOPLEFT", 8, -6)
+  lootListTitle:SetText("Encounter Loot")
+
+  local encounterLootContainer = CreateFrame("Frame", nil, lootListPanel)
+  local lootTitleHeight = lootListTitle.GetStringHeight and lootListTitle:GetStringHeight() or lootListTitle:GetHeight() or 0
+  local lootTitleOffsetY = -6 - lootTitleHeight - 8
+  encounterLootContainer:ClearAllPoints()
+  encounterLootContainer:SetPoint("TOPLEFT", lootListTitle, "BOTTOMLEFT", 0, -8)
+  encounterLootContainer:SetPoint("TOPRIGHT", lootListPanel, "TOPRIGHT", -12, lootTitleOffsetY)
+  encounterLootContainer:SetPoint("BOTTOMLEFT", lootListPanel, "BOTTOMLEFT", 12, 12)
+  encounterLootContainer:SetPoint("BOTTOMRIGHT", lootListPanel, "BOTTOMRIGHT", -12, 12)
 
   local lootScroll = AceGUI:Create("ScrollFrame")
   lootScroll:SetLayout("Flow")
-  lootListGroup:AddChild(lootScroll)
-  lootFrame:AddChild(lootListGroup)
-
-  lootFrame:AddChild(lootListSpacer)
+  lootScroll.frame:SetParent(encounterLootContainer)
+  lootScroll.frame:ClearAllPoints()
+  lootScroll.frame:SetPoint("TOPLEFT", encounterLootContainer, "TOPLEFT", 6, -6)
+  lootScroll.frame:SetPoint("BOTTOMRIGHT", encounterLootContainer, "BOTTOMRIGHT", -28, 6)
+  lootScroll.frame:Show()
 
   self.testFrame = frame
+  self.adminPanel = adminPanel
+  self.lootFrame = lootPanel
+  self.dataPanel = dataPanel
+  self.historyPanel = historyPanel
+  self.adminTabButton = adminTabButton
+  self.lootTabButton = lootTabButton
+  self.dataTabButton = dataTabButton
+  self.historyTabButton = historyTabButton
   self.sessionStatus = sessionStatus
-  self.rosterScroll = rosterScroll
-  self.voteGroup = voteGroup
-  self.voteScroll = voteScroll
-  self.resultsGroup = resultsGroup
-  self.resultsScroll = resultsScroll
+  self.playerHeaderRow = playerHeaderRow
+  self.playerScrollBox = playerScrollBox
+  self.playerScrollBar = playerScrollBar
+  self.testDataHeaderRow = testDataHeaderRow
+  self.testDataScrollBox = testDataScrollBox
+  self.testDataScrollBar = testDataScrollBar
+  self.testDataStatusLabel = testDataStatus
+  self.voteTitleLabel = voteTitle
+  self.voteResetBtn = voteResetBtn
+  self.voteStatusLabel = voteStatusLabel
+  self.votePlayerLabel = votePlayerLabel
+  self.voteButtonsRow = voteButtonsRow
+  self.voteButtons = voteButtons
+  self.resultsHeaderRow = resultsHeaderRow
+  self.resultsScrollBox = resultsScrollBox
+  self.resultsScrollBar = resultsScrollBar
+  self.resultsSummaryLabel = resultsSummaryLabel
+  self.resultsWinnerLabel = resultsWinnerLabel
+  self.resultsAbsentBtn = resultsAbsentBtn
+  self.resultsRandomBtn = resultsRandomBtn
+  self.resultsResetSoloBtn = resultsResetSoloBtn
   self.lootScroll = lootScroll
   self.instanceSelect = instanceSelect
-  self.lootFrame = lootFrame
   self.ejStatusLabel = ejStatusLabel
-
   self.encounterSelect = encounterSelect
   self.itemLinkInput = itemLinkInput
   self.itemArmorLabel = itemArmorLabel
   self.itemLinkInput2 = itemLinkInput2
   self.itemArmorLabel2 = itemArmorLabel2
-
-  self:UpdateLootFrameToggle()
 
   instanceSelect:SetCallback("OnValueChanged", function(_, _, value)
     TestUI:SelectInstance(value)
@@ -919,9 +2076,780 @@ function TestUI:CreateTestFrame()
   end)
   self:UpdateSelectedItemInfo()
 
+  self:SetActiveAdminTab("admin")
   frame:Hide()
 end
 
+function TestUI:InitializePlayerRow(row)
+  if row.isInitialized then
+    return
+  end
+  row:SetHeight(ADMIN_ROW_HEIGHT)
+  if self.playerHeaderRow and self.playerHeaderRow.GetWidth then
+    row:SetWidth(self.playerHeaderRow:GetWidth())
+  end
+
+  local highlight = row:CreateTexture(nil, "HIGHLIGHT")
+  highlight:SetColorTexture(1, 1, 1, 0.08)
+  highlight:SetAllPoints(row)
+
+  row.cells = {}
+  for _, col in ipairs(self.playerColumns or {}) do
+    if col.key == "mark" then
+      local button = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+      button:SetSize(col.width, ADMIN_BUTTON_HEIGHT)
+      button:SetPoint("LEFT", row, "LEFT", col.x, 0)
+      row.cells.mark = button
+    elseif col.key == "queue" then
+      local label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+      label:SetWidth(col.width)
+      label:SetJustifyH("CENTER")
+      label:SetPoint("LEFT", row, "LEFT", col.x, 0)
+      row.cells.queue = label
+
+      local box = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
+      box:SetSize(col.width - 6, ADMIN_BUTTON_HEIGHT)
+      box:SetPoint("LEFT", row, "LEFT", col.x + 3, 0)
+      box:SetAutoFocus(false)
+      box:SetJustifyH("CENTER")
+      if box.SetNumeric then
+        box:SetNumeric(true)
+      end
+      box:SetScript("OnEscapePressed", function(edit)
+        edit:ClearFocus()
+      end)
+      row.queueBox = box
+    elseif col.key == "won" or col.key == "raids" then
+      local box = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
+      box:SetSize(col.width - 6, ADMIN_BUTTON_HEIGHT)
+      box:SetPoint("LEFT", row, "LEFT", col.x + 3, 0)
+      box:SetAutoFocus(false)
+      box:SetJustifyH("CENTER")
+      if box.SetNumeric then
+        box:SetNumeric(true)
+      end
+      box:SetScript("OnEscapePressed", function(edit)
+        edit:ClearFocus()
+      end)
+      if col.key == "won" then
+        row.wonBox = box
+      else
+        row.raidsBox = box
+      end
+    elseif col.key == "remove" then
+      local button = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+      button:SetSize(col.width, ADMIN_BUTTON_HEIGHT)
+      button:SetPoint("LEFT", row, "LEFT", col.x, 0)
+      button:SetText("Remove")
+      row.cells.remove = button
+    else
+      local fs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+      fs:SetWidth(col.width)
+      fs:SetJustifyH(col.align or "LEFT")
+      fs:SetPoint("LEFT", row, "LEFT", col.x, 0)
+      row.cells[col.key] = fs
+    end
+  end
+
+  if row.cells.mark then
+    row.cells.mark:SetScript("OnClick", function()
+      local data = row.data
+      if not data or data.isGuest then
+        return
+      end
+      local playerKey = data.playerKey
+      if GLD.db and GLD.db.players and GLD.db.players[playerKey] then
+        local player = GLD.db.players[playerKey]
+        local newState = player.attendance == "PRESENT" and "ABSENT" or "PRESENT"
+        if GLD.SetAttendance then
+          GLD:SetAttendance(playerKey, newState)
+        else
+          player.attendance = newState
+        end
+        TestUI:RefreshTestPanel()
+        if GLD.UI and GLD.UI.RefreshMain then
+          GLD.UI:RefreshMain()
+        end
+      end
+    end)
+  end
+
+  if row.queueBox then
+    row.queueBox:SetScript("OnEnterPressed", function(box)
+      local data = row.data
+      if not data or data.isGuest then
+        box:ClearFocus()
+        return
+      end
+      local pos = ParseNonNegativeInt(box:GetText())
+      if pos ~= nil and GLD.db and GLD.db.players and GLD.db.players[data.playerKey] then
+        local player = GLD.db.players[data.playerKey]
+        if player.attendance == "ABSENT" then
+          player.savedPos = pos
+          player.queuePos = nil
+        else
+          if GLD.RemoveFromQueue then
+            GLD:RemoveFromQueue(data.playerKey)
+          end
+          if GLD.InsertToQueue then
+            GLD:InsertToQueue(data.playerKey, pos)
+          else
+            player.queuePos = pos
+          end
+        end
+        TestUI:RefreshTestPanel()
+        if GLD.UI and GLD.UI.RefreshMain then
+          GLD.UI:RefreshMain()
+        end
+      end
+      box:ClearFocus()
+    end)
+  end
+
+  if row.cells.remove then
+    row.cells.remove:SetScript("OnClick", function()
+      local data = row.data
+      if not data or not data.playerKey or not (GLD and GLD.db and GLD.db.players and GLD.db.players[data.playerKey]) then
+        return
+      end
+      if not GLD:IsAdmin() or not TestUI.queueEditEnabled then
+        return
+      end
+      if GLD.RemovePlayerFromDatabase then
+        GLD:RemovePlayerFromDatabase(data.playerKey)
+      else
+        GLD.db.players[data.playerKey] = nil
+      end
+      TestUI:RefreshTestPanel()
+      if GLD.UI and GLD.UI.RefreshMain then
+        GLD.UI:RefreshMain()
+      end
+    end)
+  end
+
+  if row.wonBox then
+    row.wonBox:SetScript("OnEnterPressed", function(box)
+      local data = row.data
+      if not data or data.isGuest then
+        box:ClearFocus()
+        return
+      end
+      local num = ParseNonNegativeInt(box:GetText())
+      if num ~= nil and GLD.db and GLD.db.players and GLD.db.players[data.playerKey] then
+        GLD.db.players[data.playerKey].numAccepted = num
+        if TestUI.testGraphsFrame and TestUI.testGraphsFrame:IsShown() then
+          TestUI:RefreshTestGraphs()
+        end
+        TestUI:RefreshTestPanel()
+        if GLD.UI and GLD.UI.RefreshMain then
+          GLD.UI:RefreshMain()
+        end
+      end
+      box:ClearFocus()
+    end)
+  end
+
+  if row.raidsBox then
+    row.raidsBox:SetScript("OnEnterPressed", function(box)
+      local data = row.data
+      if not data or data.isGuest then
+        box:ClearFocus()
+        return
+      end
+      local num = ParseNonNegativeInt(box:GetText())
+      if num ~= nil and GLD.db and GLD.db.players and GLD.db.players[data.playerKey] then
+        GLD.db.players[data.playerKey].attendanceCount = num
+        if TestUI.testGraphsFrame and TestUI.testGraphsFrame:IsShown() then
+          TestUI:RefreshTestGraphs()
+        end
+        TestUI:RefreshTestPanel()
+        if GLD.UI and GLD.UI.RefreshMain then
+          GLD.UI:RefreshMain()
+        end
+      end
+      box:ClearFocus()
+    end)
+  end
+
+  row.isInitialized = true
+end
+
+function TestUI:PopulatePlayerRow(row, data)
+  if not row or not data or not row.cells then
+    return
+  end
+  row.data = data
+  local cells = row.cells
+
+  if cells.class then
+    cells.class:SetText(data.class or "-")
+  end
+  if cells.spec then
+    cells.spec:SetText(data.spec or "-")
+  end
+  if cells.role then
+    cells.role:SetText(data.role or "-")
+  end
+  if cells.name then
+    cells.name:SetText(data.name or "-")
+    local r, g, b = GetClassColor(data.class)
+    cells.name:SetTextColor(r, g, b)
+  end
+  if cells.attendance then
+    cells.attendance:SetText(data.attendance or "-")
+    local r, g, b = GetAttendanceColor(data.attendance)
+    cells.attendance:SetTextColor(r, g, b)
+  end
+  if cells.queue then
+    cells.queue:SetText(tostring(data.queuePos or "-"))
+  end
+  if cells.frozen then
+    cells.frozen:SetText(tostring(data.savedPos or 0))
+  end
+
+  if cells.mark then
+    if data.isGuest then
+      cells.mark:SetText("Party Member")
+      if cells.mark.SetEnabled then
+        cells.mark:SetEnabled(false)
+      end
+    else
+      cells.mark:SetText(data.attendance == "PRESENT" and "Mark Absent" or "Mark Present")
+      if cells.mark.SetEnabled then
+        cells.mark:SetEnabled(true)
+      end
+    end
+  end
+
+  if row.queueBox then
+    if self.queueEditEnabled and not data.isGuest then
+      row.queueBox:Show()
+      row.queueBox:SetText(tostring(data.queuePos or ""))
+      if cells.queue then
+        cells.queue:Hide()
+      end
+    else
+      row.queueBox:Hide()
+      if cells.queue then
+        cells.queue:Show()
+      end
+    end
+  end
+
+  if row.wonBox then
+    row.wonBox:SetText(tostring(data.won or 0))
+    SetEditBoxEnabled(row.wonBox, not data.isGuest)
+  end
+  if row.raidsBox then
+    row.raidsBox:SetText(tostring(data.raids or 0))
+    SetEditBoxEnabled(row.raidsBox, not data.isGuest)
+  end
+
+  if cells.remove then
+    if GLD:IsAdmin() and self.queueEditEnabled then
+      cells.remove:SetShown(true)
+      cells.remove:SetEnabled(data.playerKey ~= nil)
+    else
+      cells.remove:SetShown(false)
+    end
+  end
+end
+
+function TestUI:ShowTestDataMessage(text, isWarning)
+  if not self.testDataStatusLabel then
+    return
+  end
+  self.testDataStatusLabel:SetText(text or "")
+  if isWarning then
+    self.testDataStatusLabel:SetTextColor(1, 0.82, 0.2)
+  else
+    self.testDataStatusLabel:SetTextColor(0.9, 0.9, 0.9)
+  end
+end
+
+function TestUI:ShowAddTestPlayerDialog()
+  if not AceGUI then
+    return
+  end
+  if self.testDataAddFrame then
+    self.testDataAddFrame:Release()
+    self.testDataAddFrame = nil
+  end
+
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Add Test Player")
+  frame:SetStatusText("Create a test-only player")
+  frame:SetWidth(360)
+  frame:SetHeight(240)
+  frame:SetLayout("Flow")
+  frame:EnableResize(false)
+  frame:SetCallback("OnClose", function(widget)
+    self.testDataAddFrame = nil
+    widget:Release()
+  end)
+
+  local nameBox = AceGUI:Create("EditBox")
+  nameBox:SetLabel("Name")
+  nameBox:SetWidth(300)
+  frame:AddChild(nameBox)
+
+  local classDrop = AceGUI:Create("Dropdown")
+  classDrop:SetLabel("Class")
+  classDrop:SetWidth(300)
+  classDrop:SetList(BuildClassOptions())
+  frame:AddChild(classDrop)
+
+  local specDrop = AceGUI:Create("Dropdown")
+  specDrop:SetLabel("Spec")
+  specDrop:SetWidth(300)
+  frame:AddChild(specDrop)
+
+  classDrop:SetCallback("OnValueChanged", function(_, _, value)
+    specDrop:SetList(BuildSpecOptionsForClass(value))
+    specDrop:SetValue(nil)
+  end)
+
+  local createBtn = AceGUI:Create("Button")
+  createBtn:SetText("Create")
+  createBtn:SetWidth(120)
+  createBtn:SetCallback("OnClick", function()
+    local name = nameBox:GetText()
+    local classToken = classDrop:GetValue()
+    local specName = specDrop:GetValue()
+    local ok, err, warn = GLD:AddTestPlayer({
+      name = name,
+      class = classToken,
+      spec = specName,
+    })
+    if not ok then
+      TestUI:ShowTestDataMessage(err or "Unable to add player.", true)
+      return
+    end
+    if warn then
+      TestUI:ShowTestDataMessage(warn, true)
+    else
+      TestUI:ShowTestDataMessage("Player added.", false)
+    end
+    TestUI:RefreshTestPanel()
+    TestUI:RefreshTestDataPanel()
+    frame:Release()
+    TestUI.testDataAddFrame = nil
+  end)
+  frame:AddChild(createBtn)
+
+  self.testDataAddFrame = frame
+end
+
+function TestUI:ShowEditTestPlayerDialog(playerKey)
+  if not AceGUI or not GLD.testDb or not GLD.testDb.players then
+    return
+  end
+  local player = GLD.testDb.players[playerKey]
+  if not player then
+    return
+  end
+  if self.testDataEditFrame then
+    self.testDataEditFrame:Release()
+    self.testDataEditFrame = nil
+  end
+
+  local frame = AceGUI:Create("Frame")
+  frame:SetTitle("Edit Test Player")
+  frame:SetStatusText(player.name or "")
+  frame:SetWidth(360)
+  frame:SetHeight(360)
+  frame:SetLayout("Flow")
+  frame:EnableResize(false)
+  frame:SetCallback("OnClose", function(widget)
+    self.testDataEditFrame = nil
+    widget:Release()
+  end)
+
+  local nameLabel = AceGUI:Create("Label")
+  nameLabel:SetText("Name: " .. (player.name or "?"))
+  nameLabel:SetFullWidth(true)
+  frame:AddChild(nameLabel)
+
+  local classDrop = AceGUI:Create("Dropdown")
+  classDrop:SetLabel("Class")
+  classDrop:SetWidth(300)
+  classDrop:SetList(BuildClassOptions())
+  classDrop:SetValue(player.class)
+  frame:AddChild(classDrop)
+
+  local specDrop = AceGUI:Create("Dropdown")
+  specDrop:SetLabel("Spec")
+  specDrop:SetWidth(300)
+  specDrop:SetList(BuildSpecOptionsForClass(player.class))
+  specDrop:SetValue(player.specName)
+  frame:AddChild(specDrop)
+
+  classDrop:SetCallback("OnValueChanged", function(_, _, value)
+    specDrop:SetList(BuildSpecOptionsForClass(value))
+    specDrop:SetValue(nil)
+  end)
+
+  local attendanceDrop = AceGUI:Create("Dropdown")
+  attendanceDrop:SetLabel("Attendance")
+  attendanceDrop:SetWidth(300)
+  attendanceDrop:SetList({ PRESENT = "Present", ABSENT = "Absent" })
+  attendanceDrop:SetValue(player.attendance or "PRESENT")
+  frame:AddChild(attendanceDrop)
+
+  local queueBox = AceGUI:Create("EditBox")
+  queueBox:SetLabel("Queue Pos")
+  queueBox:SetWidth(300)
+  queueBox:SetText(tostring(player.queuePos or ""))
+  frame:AddChild(queueBox)
+
+  local wonBox = AceGUI:Create("EditBox")
+  wonBox:SetLabel("Won")
+  wonBox:SetWidth(300)
+  wonBox:SetText(tostring(player.numAccepted or 0))
+  frame:AddChild(wonBox)
+
+  local raidsBox = AceGUI:Create("EditBox")
+  raidsBox:SetLabel("Raids")
+  raidsBox:SetWidth(300)
+  raidsBox:SetText(tostring(player.attendanceCount or 0))
+  frame:AddChild(raidsBox)
+
+  local saveBtn = AceGUI:Create("Button")
+  saveBtn:SetText("Save")
+  saveBtn:SetWidth(120)
+  saveBtn:SetCallback("OnClick", function()
+    local classToken = classDrop:GetValue()
+    local specName = specDrop:GetValue()
+    local attendance = attendanceDrop:GetValue() or player.attendance or "PRESENT"
+    local queuePosText = queueBox:GetText()
+    local wonText = wonBox:GetText()
+    local raidsText = raidsBox:GetText()
+    local queuePos = nil
+    if queuePosText and queuePosText ~= "" then
+      queuePos = ParseNonNegativeInt(queuePosText)
+      if queuePos == nil then
+        TestUI:ShowTestDataMessage("Queue Pos must be >= 0.", true)
+        return
+      end
+    end
+    local won = ParseNonNegativeInt(wonText)
+    if won == nil then
+      TestUI:ShowTestDataMessage("Won must be >= 0.", true)
+      return
+    end
+    local raids = ParseNonNegativeInt(raidsText)
+    if raids == nil then
+      TestUI:ShowTestDataMessage("Raids must be >= 0.", true)
+      return
+    end
+    local ok, err, warn = GLD:UpdateTestPlayer(playerKey, {
+      class = classToken,
+      spec = specName,
+      attendance = attendance,
+      queuePos = queuePos,
+      numAccepted = won,
+      attendanceCount = raids,
+    })
+    if not ok then
+      TestUI:ShowTestDataMessage(err or "Unable to update player.", true)
+      return
+    end
+    if warn then
+      TestUI:ShowTestDataMessage(warn, true)
+    else
+      TestUI:ShowTestDataMessage("Player updated.", false)
+    end
+    TestUI:RefreshTestPanel()
+    TestUI:RefreshTestDataPanel()
+    frame:Release()
+    TestUI.testDataEditFrame = nil
+  end)
+  frame:AddChild(saveBtn)
+
+  self.testDataEditFrame = frame
+end
+
+function TestUI:InitializeTestDataRow(row)
+  if row.testDataInitialized then
+    return
+  end
+  row:SetHeight(ADMIN_ROW_HEIGHT)
+  if self.testDataHeaderRow and self.testDataHeaderRow.GetWidth then
+    row:SetWidth(self.testDataHeaderRow:GetWidth())
+  end
+
+  local highlight = row:CreateTexture(nil, "HIGHLIGHT")
+  highlight:SetColorTexture(1, 1, 1, 0.08)
+  highlight:SetAllPoints(row)
+
+  row.cells = {}
+  for _, col in ipairs(self.testDataColumns or {}) do
+    if col.key == "queue" or col.key == "held" or col.key == "won" or col.key == "raids" then
+      local box = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
+      box:SetSize(col.width - 6, ADMIN_BUTTON_HEIGHT)
+      box:SetPoint("LEFT", row, "LEFT", col.x + 3, 0)
+      box:SetAutoFocus(false)
+      box:SetJustifyH("CENTER")
+      if box.SetNumeric then
+        box:SetNumeric(true)
+      end
+      box:SetScript("OnEscapePressed", function(edit)
+        edit:ClearFocus()
+      end)
+      if col.key == "queue" then
+        row.queueBox = box
+      elseif col.key == "held" then
+        row.heldBox = box
+      elseif col.key == "won" then
+        row.wonBox = box
+      elseif col.key == "raids" then
+        row.raidsBox = box
+      end
+    elseif col.key == "edit" or col.key == "remove" then
+      local button = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+      button:SetSize(col.width, ADMIN_BUTTON_HEIGHT)
+      button:SetPoint("LEFT", row, "LEFT", col.x, 0)
+      row.cells[col.key] = button
+    else
+      local fs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+      fs:SetWidth(col.width)
+      fs:SetJustifyH(col.align or "LEFT")
+      fs:SetPoint("LEFT", row, "LEFT", col.x, 0)
+      row.cells[col.key] = fs
+    end
+  end
+
+  if row.queueBox then
+    row.queueBox:SetScript("OnEnterPressed", function(box)
+      local data = row.data
+      if not data or not data.playerKey then
+        box:ClearFocus()
+        return
+      end
+      if not TestUI.queueEditEnabled then
+        TestUI:ShowTestDataMessage("Edit Roster is off.", true)
+        box:ClearFocus()
+        return
+      end
+      local pos = ParseNonNegativeInt(box:GetText())
+      if pos == nil then
+        TestUI:ShowTestDataMessage("Queue Pos must be >= 0.", true)
+      else
+        local maxPos = GLD.GetTestQueueMax and GLD:GetTestQueueMax() or nil
+        if maxPos ~= nil and pos > maxPos then
+          pos = maxPos
+          TestUI:ShowTestDataMessage("Queue Pos capped at " .. tostring(maxPos) .. ".", true)
+        end
+        local ok, err, warn = GLD:UpdateTestPlayer(data.playerKey, { queuePos = pos })
+        if not ok then
+          TestUI:ShowTestDataMessage(err or "Unable to update Queue Pos.", true)
+        elseif warn then
+          TestUI:ShowTestDataMessage(warn, true)
+        else
+          TestUI:RefreshTestPanel()
+          TestUI:RefreshTestDataPanel()
+        end
+      end
+      box:ClearFocus()
+    end)
+  end
+
+  if row.heldBox then
+    row.heldBox:SetScript("OnEnterPressed", function(box)
+      local data = row.data
+      if not data or not data.playerKey then
+        box:ClearFocus()
+        return
+      end
+      if not TestUI.queueEditEnabled then
+        TestUI:ShowTestDataMessage("Edit Roster is off.", true)
+        box:ClearFocus()
+        return
+      end
+      local pos = ParseNonNegativeInt(box:GetText())
+      if pos == nil then
+        TestUI:ShowTestDataMessage("Held Pos must be >= 0.", true)
+      else
+        local ok, err = GLD:UpdateTestPlayer(data.playerKey, { savedPos = pos })
+        if not ok then
+          TestUI:ShowTestDataMessage(err or "Unable to update Held Pos.", true)
+        else
+          TestUI:RefreshTestPanel()
+          TestUI:RefreshTestDataPanel()
+        end
+      end
+      box:ClearFocus()
+    end)
+  end
+
+  if row.wonBox then
+    row.wonBox:SetScript("OnEnterPressed", function(box)
+      local data = row.data
+      if not data or not data.playerKey then
+        box:ClearFocus()
+        return
+      end
+      local num = ParseNonNegativeInt(box:GetText())
+      if num == nil then
+        TestUI:ShowTestDataMessage("Won must be >= 0.", true)
+      else
+        local ok, err = GLD:UpdateTestPlayer(data.playerKey, { numAccepted = num })
+        if not ok then
+          TestUI:ShowTestDataMessage(err or "Unable to update Won.", true)
+        else
+          TestUI:RefreshTestPanel()
+          TestUI:RefreshTestDataPanel()
+        end
+      end
+      box:ClearFocus()
+    end)
+  end
+
+  if row.raidsBox then
+    row.raidsBox:SetScript("OnEnterPressed", function(box)
+      local data = row.data
+      if not data or not data.playerKey then
+        box:ClearFocus()
+        return
+      end
+      local num = ParseNonNegativeInt(box:GetText())
+      if num == nil then
+        TestUI:ShowTestDataMessage("Raids must be >= 0.", true)
+      else
+        local ok, err = GLD:UpdateTestPlayer(data.playerKey, { attendanceCount = num })
+        if not ok then
+          TestUI:ShowTestDataMessage(err or "Unable to update Raids.", true)
+        else
+          TestUI:RefreshTestPanel()
+          TestUI:RefreshTestDataPanel()
+        end
+      end
+      box:ClearFocus()
+    end)
+  end
+
+  if row.cells.edit then
+    row.cells.edit:SetText("Edit")
+    row.cells.edit:SetScript("OnClick", function()
+      local data = row.data
+      if data and data.playerKey then
+        TestUI:ShowEditTestPlayerDialog(data.playerKey)
+      end
+    end)
+  end
+
+  if row.cells.remove then
+    row.cells.remove:SetText("Remove")
+    row.cells.remove:SetScript("OnClick", function()
+      local data = row.data
+      if data and data.playerKey then
+        GLD:RemoveTestPlayer(data.playerKey)
+        TestUI:ShowTestDataMessage("Player removed.", false)
+        TestUI:RefreshTestPanel()
+        TestUI:RefreshTestDataPanel()
+      end
+    end)
+  end
+
+  row.testDataInitialized = true
+end
+
+function TestUI:PopulateTestDataRow(row, data)
+  if not row or not data or not row.cells then
+    return
+  end
+  row.data = data
+
+  if row.cells.class then
+    row.cells.class:SetText(data.class or "-")
+  end
+  if row.cells.spec then
+    row.cells.spec:SetText(data.spec or "-")
+  end
+  if row.cells.role then
+    row.cells.role:SetText(data.role or "-")
+  end
+  if row.cells.name then
+    row.cells.name:SetText(data.name or "-")
+    local r, g, b = GetClassColor(data.class)
+    row.cells.name:SetTextColor(r, g, b)
+  end
+
+  if row.queueBox then
+    row.queueBox:SetText(tostring(data.queuePos or ""))
+    SetEditBoxEnabled(row.queueBox, self.queueEditEnabled)
+  end
+  if row.heldBox then
+    row.heldBox:SetText(tostring(data.savedPos or ""))
+    SetEditBoxEnabled(row.heldBox, self.queueEditEnabled)
+  end
+  if row.wonBox then
+    row.wonBox:SetText(tostring(data.won or 0))
+  end
+  if row.raidsBox then
+    row.raidsBox:SetText(tostring(data.raids or 0))
+  end
+end
+
+function TestUI:InitializeResultsRow(row)
+  if row.isInitialized then
+    return
+  end
+  row:SetHeight(ADMIN_ROW_HEIGHT)
+  if self.resultsHeaderRow and self.resultsHeaderRow.GetWidth then
+    row:SetWidth(self.resultsHeaderRow:GetWidth())
+  end
+
+  local highlight = row:CreateTexture(nil, "HIGHLIGHT")
+  highlight:SetColorTexture(1, 1, 1, 0.08)
+  highlight:SetAllPoints(row)
+
+  row.cells = {}
+  for _, col in ipairs(self.resultsColumns or {}) do
+    local fs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    fs:SetWidth(col.width)
+    fs:SetJustifyH(col.align or "LEFT")
+    fs:SetPoint("LEFT", row, "LEFT", col.x, 0)
+    row.cells[col.key] = fs
+  end
+
+  row.isInitialized = true
+end
+
+function TestUI:PopulateResultsRow(row, data)
+  if not row or not data or not row.cells then
+    return
+  end
+  row.data = data
+  local cells = row.cells
+
+  if cells.name then
+    cells.name:SetText(data.name or "-")
+    local r, g, b = GetClassColor(data.class)
+    cells.name:SetTextColor(r, g, b)
+  end
+  if cells.choice then
+    cells.choice:SetText(data.choice or "-")
+  end
+  if cells.queue then
+    cells.queue:SetText(data.queue or "-")
+  end
+  if cells.frozen then
+    cells.frozen:SetText(data.frozen or "-")
+  end
+  if cells.loot then
+    cells.loot:SetText(data.loot or "-")
+  end
+  if cells.class then
+    cells.class:SetText(data.class or "-")
+  end
+  if cells.armor then
+    cells.armor:SetText(data.armor or "-")
+  end
+  if cells.weapon then
+    cells.weapon:SetText(data.weapon or "-")
+  end
+end
 function TestUI:RefreshTestPanel()
   if not self.testFrame then
     return
@@ -929,177 +2857,141 @@ function TestUI:RefreshTestPanel()
 
   self:UpdateDynamicTestVoters()
 
-  if GLD.db.testSession then
-    self.testSessionActive = GLD.db.testSession.active == true
+  if self.playerHeaderCells and self.playerHeaderCells.remove then
+    local showRemove = GLD:IsAdmin() and self.queueEditEnabled
+    self.playerHeaderCells.remove:SetShown(showRemove)
+  end
+
+  if GLD.testDb and GLD.testDb.testSession then
+    self.testSessionActive = GLD.testDb.testSession.active == true
   end
 
   local sessionActive = self.testSessionActive == true
+  if self.sessionStatus then
     self.sessionStatus:SetText("Session Status: " .. (sessionActive and "|cff00ff00ACTIVE|r" or "|cffff0000INACTIVE|r"))
-
-  self.rosterScroll:ReleaseChildren()
-
-  GLD:Debug("RefreshTestPanel: resultsScroll=" .. tostring(self.resultsScroll))
-
-  local rawList = BuildTestRosterList()
-  local list = {}
-  if rawList then
-    for _, entry in ipairs(rawList) do
-      local name = entry.name
-      local realm = entry.realm
-      local key = nil
-      if name then
-        key = GLD:FindPlayerKeyByName(name, realm)
-      end
-      local dbPlayer = key and GLD.db.players and GLD.db.players[key] or nil
-      if dbPlayer then
-        list[#list + 1] = dbPlayer
-      else
-        list[#list + 1] = entry
-      end
-    end
   end
+
+  local list = BuildAdminRosterList() or {}
 
   table.sort(list, function(a, b)
-    if a.attendance == "PRESENT" and b.attendance ~= "PRESENT" then
+    local playerA = a.player or a
+    local playerB = b.player or b
+    local attendanceA = playerA and playerA.attendance or ""
+    local attendanceB = playerB and playerB.attendance or ""
+    if attendanceA == "PRESENT" and attendanceB ~= "PRESENT" then
       return true
     end
-    if a.attendance ~= "PRESENT" and b.attendance == "PRESENT" then
+    if attendanceA ~= "PRESENT" and attendanceB == "PRESENT" then
       return false
     end
-    if a.attendance == "PRESENT" and b.attendance == "PRESENT" then
-      local posA = a.queuePos or 99999
-      local posB = b.queuePos or 99999
+    if attendanceA == "PRESENT" and attendanceB == "PRESENT" then
+      local posA = playerA and playerA.queuePos or 99999
+      local posB = playerB and playerB.queuePos or 99999
       if posA ~= posB then
         return posA < posB
       end
     end
-    if a.attendance ~= "PRESENT" and b.attendance ~= "PRESENT" then
-      local posA = a.savedPos or 99999
-      local posB = b.savedPos or 99999
+    if attendanceA ~= "PRESENT" and attendanceB ~= "PRESENT" then
+      local posA = playerA and playerA.savedPos or 99999
+      local posB = playerB and playerB.savedPos or 99999
       if posA ~= posB then
         return posA < posB
       end
     end
-    return (a.name or "") < (b.name or "")
+    return ((playerA and playerA.name) or "") < ((playerB and playerB.name) or "")
   end)
 
-  for _, player in ipairs(list) do
-    local row = AceGUI:Create("SimpleGroup")
-    row:SetFullWidth(true)
-    row:SetLayout("Flow")
-
-    local nameLabel = AceGUI:Create("Label")
-    local displayName = player.name or "?"
-    if player._isGuest then
-      displayName = displayName .. " (Party)"
-    end
-      local classText = ColorizeClassName(displayName, player.class)
-      nameLabel:SetText(string.format("%s | %s", player.specName or "-", classText))
-    nameLabel:SetWidth(160)
-    row:AddChild(nameLabel)
-
-    local attendanceLabel = AceGUI:Create("Label")
-    attendanceLabel:SetText(player.attendance or "-")
-    attendanceLabel:SetWidth(80)
-    row:AddChild(attendanceLabel)
-
-    local toggleBtn = AceGUI:Create("Button")
-    toggleBtn:SetText(player.attendance == "PRESENT" and "Mark Absent" or "Mark Present")
-    toggleBtn:SetWidth(120)
-    local playerKey = GetTestPlayerKey(player.name, player.realm)
-    if player._isGuest then
-      toggleBtn:SetText("Party Member")
-      if toggleBtn.SetDisabled then
-        toggleBtn:SetDisabled(true)
+  local rows = {}
+  for _, entry in ipairs(list) do
+    local player = entry.player
+    if player then
+      local displayName = GetLivePlayerDisplayName(player, entry.key, player.source == "guest")
+      local baseName = player.name
+      if not baseName then
+        baseName = NS:GetPlayerBaseName(displayName)
       end
-    else
-      toggleBtn:SetCallback("OnClick", function()
-        if TestUI.testPlayers and TestUI.testPlayers[playerKey] then
-          local newState = TestUI.testPlayers[playerKey].attendance == "PRESENT" and "ABSENT" or "PRESENT"
-          TestUI.testPlayers[playerKey].attendance = newState
-          TestUI:RefreshTestPanel()
-        end
-      end)
-    end
-    row:AddChild(toggleBtn)
-
-    if self.queueEditEnabled and not player._isGuest then
-      local queueBox = AceGUI:Create("EditBox")
-      queueBox:SetLabel("Queue")
-      queueBox:SetText(tostring(player.queuePos or ""))
-      queueBox:SetWidth(60)
-      queueBox:SetCallback("OnEnterPressed", function(_, _, value)
-        local pos = tonumber(value)
-        if TestUI.testPlayers and TestUI.testPlayers[playerKey] then
-          TestUI.testPlayers[playerKey].queuePos = pos
-          TestUI:RefreshTestPanel()
-        end
-      end)
-      row:AddChild(queueBox)
-    else
-      local queueLabel = AceGUI:Create("Label")
-      queueLabel:SetText(tostring(player.queuePos or "-"))
-      queueLabel:SetWidth(60)
-      row:AddChild(queueLabel)
-    end
-
-    local frozenLabel = AceGUI:Create("Label")
-    frozenLabel:SetText(tostring(player.savedPos or 0))
-    frozenLabel:SetWidth(60)
-    row:AddChild(frozenLabel)
-
-    local wonBox = AceGUI:Create("EditBox")
-    wonBox:SetLabel("Won")
-    wonBox:SetText(tostring(player.numAccepted or 0))
-    wonBox:SetWidth(80)
-    if player._isGuest then
-      if wonBox.SetDisabled then
-        wonBox:SetDisabled(true)
+      baseName = baseName or displayName
+      local role = NS.GetRoleForPlayer and NS:GetRoleForPlayer(baseName) or "NONE"
+      if role == "NONE" then
+        role = "-"
       end
-    else
-      wonBox:SetCallback("OnEnterPressed", function(_, _, value)
-        local num = tonumber(value) or 0
-        if TestUI.testPlayers and TestUI.testPlayers[playerKey] then
-          TestUI.testPlayers[playerKey].numAccepted = num
-          if TestUI.testGraphsFrame and TestUI.testGraphsFrame:IsShown() then
-            TestUI:RefreshTestGraphs()
-          end
-        end
-      end)
+      local specName = player.specName or player.spec or "-"
+      rows[#rows + 1] = {
+        player = player,
+        playerKey = entry.key,
+        name = displayName,
+        class = player.class,
+        spec = specName,
+        role = role or "-",
+        attendance = player.attendance or "-",
+        queuePos = player.queuePos,
+        savedPos = player.savedPos,
+        won = player.numAccepted or 0,
+        raids = player.attendanceCount or 0,
+        isGuest = player.source == "guest",
+      }
     end
-    row:AddChild(wonBox)
-
-    local raidsBox = AceGUI:Create("EditBox")
-    raidsBox:SetLabel("Raids")
-    raidsBox:SetText(tostring(player.attendanceCount or 0))
-    raidsBox:SetWidth(80)
-    if player._isGuest then
-      if raidsBox.SetDisabled then
-        raidsBox:SetDisabled(true)
-      end
-    else
-      raidsBox:SetCallback("OnEnterPressed", function(_, _, value)
-        local num = tonumber(value) or 0
-        if TestUI.testPlayers and TestUI.testPlayers[playerKey] then
-          TestUI.testPlayers[playerKey].attendanceCount = num
-          if TestUI.testGraphsFrame and TestUI.testGraphsFrame:IsShown() then
-            TestUI:RefreshTestGraphs()
-          end
-        end
-      end)
-    end
-    row:AddChild(raidsBox)
-
-    self.rosterScroll:AddChild(row)
   end
 
+  if self.playerScrollBox and CreateDataProvider then
+    local dataProvider = CreateDataProvider()
+    for _, rowData in ipairs(rows) do
+      dataProvider:Insert(rowData)
+    end
+    self.playerScrollBox:SetDataProvider(dataProvider, true)
+  end
+
+  self:RefreshTestDataPanel()
   self:RefreshInstanceList()
   self:RefreshVotePanel()
   self:RefreshResultsPanel()
+  if self.testHistoryTree then
+    self:RefreshTestHistoryList()
+    self:RefreshTestHistoryDetails()
+  end
+end
+
+function TestUI:RefreshTestDataPanel()
+  if not self.testDataScrollBox or not CreateDataProvider then
+    return
+  end
+  local rows = {}
+  for key, player in pairs(GetTestPlayersTable()) do
+    if player then
+      local displayName = NS:GetPlayerDisplayName(player.name, player.source == "guest")
+      rows[#rows + 1] = {
+        playerKey = key,
+        class = player.class,
+        spec = player.specName or player.spec or "-",
+        role = GetRoleForClassSpec(player.class, player.specName or player.spec),
+        name = displayName,
+        queuePos = player.queuePos,
+        savedPos = player.savedPos,
+        won = player.numAccepted or 0,
+        raids = player.attendanceCount or 0,
+      }
+    end
+  end
+  local function NormalizeSortingName(value)
+    local base = NS:GetPlayerBaseName(value or "")
+    if base then
+      return base
+    end
+    return value or ""
+  end
+  table.sort(rows, function(a, b)
+    return NormalizeSortingName(a.name) < NormalizeSortingName(b.name)
+  end)
+
+  local dataProvider = CreateDataProvider()
+  for _, rowData in ipairs(rows) do
+    dataProvider:Insert(rowData)
+  end
+  self.testDataScrollBox:SetDataProvider(dataProvider, true)
 end
 
 function TestUI:RefreshVotePanel()
-  if not self.voteScroll then
+  if not self.voteStatusLabel then
     return
   end
 
@@ -1109,64 +3001,58 @@ function TestUI:RefreshVotePanel()
     self.currentVoterIndex = 0
   end
 
-  self.voteScroll:ReleaseChildren()
-  GLD:Debug("RefreshVotePanel: index=" .. tostring(self.currentVoterIndex))
-
-  local debugLabel = AceGUI:Create("Label")
-  debugLabel:SetFullWidth(true)
-  debugLabel:SetText("Test vote panel active")
-  self.voteScroll:AddChild(debugLabel)
-
-  local resetBtn = AceGUI:Create("Button")
-  resetBtn:SetText("Reset Votes")
-  resetBtn:SetWidth(120)
-  resetBtn:SetCallback("OnClick", function()
-    self:ResetTestVotes()
-    self:RefreshVotePanel()
-    self:RefreshResultsPanel()
-  end)
   if self.disableManualVotes then
-    if resetBtn.SetDisabled then
-      resetBtn:SetDisabled(true)
+    if self.voteResetBtn and self.voteResetBtn.SetEnabled then
+      self.voteResetBtn:SetEnabled(false)
     end
-  end
-  self.voteScroll:AddChild(resetBtn)
-
-  if self.disableManualVotes then
-    if self.voteGroup then
-      self.voteGroup:SetTitle("Test Vote Selection (live)")
+    if self.voteTitleLabel then
+      self.voteTitleLabel:SetText("Test Vote Selection (live)")
     end
-    local infoLabel = AceGUI:Create("Label")
-    infoLabel:SetFullWidth(true)
-    infoLabel:SetText("Manual voting disabled. Waiting for live votes sent to the authority.")
-    self.voteScroll:AddChild(infoLabel)
+    if self.voteStatusLabel then
+      self.voteStatusLabel:SetText("Manual voting disabled. Waiting for live votes sent to the authority.")
+    end
+    if self.votePlayerLabel then
+      self.votePlayerLabel:SetText("")
+    end
+    if self.voteButtonsRow then
+      self.voteButtonsRow:Hide()
+    end
     return
+  end
+
+  if self.voteResetBtn and self.voteResetBtn.SetEnabled then
+    self.voteResetBtn:SetEnabled(true)
+  end
+  if self.voteButtonsRow then
+    self.voteButtonsRow:Show()
   end
 
   local activeVoters = GetActiveVoters()
   local currentEntry = activeVoters[self.currentVoterIndex + 1]
   local name = currentEntry and currentEntry.name or nil
-  if self.voteGroup then
-    self.voteGroup:SetTitle("Test Vote Selection" .. (name and (" - " .. name) or ""))
+  if self.voteTitleLabel then
+    self.voteTitleLabel:SetText("Test Vote Selection" .. (name and (" - " .. name) or ""))
   end
-  GLD:Debug("Test vote current player=" .. tostring(name))
   if not name then
-    local doneLabel = AceGUI:Create("Label")
-    doneLabel:SetFullWidth(true)
-    doneLabel:SetText("All test votes recorded.")
-    self.voteScroll:AddChild(doneLabel)
+    if self.voteStatusLabel then
+      self.voteStatusLabel:SetText("All test votes recorded.")
+    end
+    if self.votePlayerLabel then
+      self.votePlayerLabel:SetText("")
+    end
+    if self.voteButtonsRow then
+      self.voteButtonsRow:Hide()
+    end
     self:RefreshResultsPanel()
     return
   end
 
-  local header = AceGUI:Create("Heading")
-  header:SetFullWidth(true)
-  header:SetText("Player: " .. name)
-  self.voteScroll:AddChild(header)
-
-  local row = AceGUI:Create("SimpleGroup")
-  row:SetFullWidth(true)
-  row:SetLayout("Flow")
+  if self.voteStatusLabel then
+    self.voteStatusLabel:SetText("Test vote panel active")
+  end
+  if self.votePlayerLabel then
+    self.votePlayerLabel:SetText("Player: " .. name)
+  end
 
   local itemLink = NormalizeItemInput(self.itemLinkInput and self.itemLinkInput:GetText() or nil)
   local canNeed = true
@@ -1174,55 +3060,41 @@ function TestUI:RefreshVotePanel()
     canNeed = IsNeedAllowedForEntry(currentEntry, itemLink)
   end
 
-  local function addButton(text, vote)
-    local btn = AceGUI:Create("Button")
-    btn:SetText(text)
-    btn:SetWidth(70)
-    if vote == "NEED" and not canNeed then
-      btn:SetDisabled(true)
+  local function setupVoteButton(button, vote)
+    if not button then
+      return
     end
-    btn:SetCallback("OnClick", function()
+    if button.SetEnabled then
+      if vote == "NEED" and not canNeed then
+        button:SetEnabled(false)
+      else
+        button:SetEnabled(true)
+      end
+    end
+    button:SetScript("OnClick", function()
       self.testVotes[name] = vote
       self.currentVoterIndex = self.currentVoterIndex + 1
       GLD:Debug("Test vote: " .. tostring(name) .. " -> " .. tostring(vote) .. " (next index=" .. tostring(self.currentVoterIndex) .. ")")
       self:RefreshVotePanel()
       self:RefreshResultsPanel()
     end)
-    row:AddChild(btn)
   end
 
-  addButton("Need", "NEED")
-  addButton("Greed", "GREED")
-  addButton("Mog", "TRANSMOG")
-  addButton("Pass", "PASS")
+  local buttons = self.voteButtons or {}
+  setupVoteButton(buttons.need, "NEED")
+  setupVoteButton(buttons.greed, "GREED")
+  setupVoteButton(buttons.mog, "TRANSMOG")
+  setupVoteButton(buttons.pass, "PASS")
 
-  self.voteScroll:AddChild(row)
   self:RefreshResultsPanel()
 end
 
 function TestUI:RefreshResultsPanel()
-  if not self.resultsScroll then
+  if not self.resultsScrollBox then
     return
   end
 
   self:UpdateDynamicTestVoters()
-
-  self.resultsScroll:ReleaseChildren()
-
-  if self.disableManualVotes and not IsInGroup() and not IsInRaid() then
-    local resetSoloBtn = AceGUI:Create("Button")
-    resetSoloBtn:SetText("Reset Solo Test Votes")
-    resetSoloBtn:SetWidth(180)
-    resetSoloBtn:SetCallback("OnClick", function()
-      self:ResetSoloTestVotes()
-    end)
-    self.resultsScroll:AddChild(resetSoloBtn)
-  end
-
-  local header = AceGUI:Create("Label")
-  header:SetFullWidth(true)
-  header:SetText("Name | Choice | Loot Item Type | Class | Armor Type | Weapon Type")
-  self.resultsScroll:AddChild(header)
 
   local itemLink = NormalizeItemInput(self.itemLinkInput and self.itemLinkInput:GetText() or nil)
   local liveSession = nil
@@ -1232,17 +3104,46 @@ function TestUI:RefreshResultsPanel()
       liveSession = candidate
     end
   end
+  local manualSession = nil
+  if not liveSession and self.currentTestRollID and GLD.activeRolls then
+    local candidate = GLD.activeRolls[self.currentTestRollID]
+    if candidate and candidate.isTest then
+      manualSession = candidate
+    end
+  end
   local liveVotes = liveSession and liveSession.votes or nil
+  local provider = TestProvider or LiveProvider
 
   local function getVoteForEntry(entry)
     if not entry then
       return nil
     end
     if liveVotes then
-      local key = GLD:GetRollCandidateKey(entry.name)
+      local key = nil
+      if entry.name and provider and provider.GetPlayerKeyByName then
+        local name, realm = NS:SplitNameRealm(entry.name)
+        key = provider:GetPlayerKeyByName(name, realm)
+      end
+      if not key then
+        key = GLD:GetRollCandidateKey(entry.name)
+      end
       return liveVotes[key] or liveVotes[entry.name]
     end
     return self.testVotes[entry.name]
+  end
+
+  local function getPositionsForEntry(entry)
+    if not entry or not entry.name then
+      return "-", "-"
+    end
+    local name, realm = NS:SplitNameRealm(entry.name)
+    local key = nil
+    if provider and provider.GetPlayerKeyByName then
+      key = provider:GetPlayerKeyByName(name, realm)
+    end
+    local queuePos = key and provider and provider.GetQueuePos and provider:GetQueuePos(key) or "-"
+    local savedPos = key and provider and provider.GetHeldPos and provider:GetHeldPos(key) or "-"
+    return queuePos, savedPos
   end
   local counts = { NEED = 0, GREED = 0, TRANSMOG = 0, PASS = 0 }
   local activeVoters = GetActiveVoters()
@@ -1259,11 +3160,10 @@ function TestUI:RefreshResultsPanel()
     end
   end
 
-  local summary = AceGUI:Create("Label")
-  summary:SetFullWidth(true)
-  summary:SetText(string.format("Need: %d | Greed: %d | Mog: %d | Pass: %d",
-    counts.NEED, counts.GREED, counts.TRANSMOG, counts.PASS))
-  self.resultsScroll:AddChild(summary)
+  if self.resultsSummaryLabel then
+    self.resultsSummaryLabel:SetText(string.format("Need: %d | Greed: %d | Mog: %d | Pass: %d",
+      counts.NEED, counts.GREED, counts.TRANSMOG, counts.PASS))
+  end
 
   local allDone = true
   if liveSession and liveSession.expectedVoters then
@@ -1282,93 +3182,158 @@ function TestUI:RefreshResultsPanel()
     end
   end
 
-  local winnerLabel = AceGUI:Create("Label")
-  winnerLabel:SetFullWidth(true)
-  winnerLabel:SetText("Winner: (pending votes)")
+  local winnerText = "Winner: (pending votes)"
   if allDone then
-    local winner = nil
     local lootArmorType = GetArmorTypeOnly(itemLink)
+    local armorPriority = {}
+    local hasArmorPriority = false
     if lootArmorType == "Cloth" or lootArmorType == "Leather" or lootArmorType == "Mail" or lootArmorType == "Plate" then
       for _, entry in ipairs(activeVoters) do
-        if entry.armor == lootArmorType and getVoteForEntry(entry) == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) then
-          winner = entry.name
-          break
+        local vote = getVoteForEntry(entry)
+        if vote == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) and entry.armor == lootArmorType then
+          local name, realm = NS:SplitNameRealm(entry.name)
+          local key = provider and provider.GetPlayerKeyByName and provider:GetPlayerKeyByName(name, realm) or nil
+          if key then
+            armorPriority[key] = true
+            hasArmorPriority = true
+          end
         end
       end
     end
 
-    if not winner and counts.NEED > 0 then
-      for _, entry in ipairs(activeVoters) do
-        if getVoteForEntry(entry) == "NEED" and (not itemLink or IsNeedAllowedForEntry(entry, itemLink)) then
-          winner = entry.name
-          break
+    local votesByKey = {}
+    for _, entry in ipairs(activeVoters) do
+      local vote = getVoteForEntry(entry)
+      if vote then
+        if vote == "NEED" and itemLink and not IsNeedAllowedForEntry(entry, itemLink) then
+          vote = nil
+        end
+      end
+      if vote then
+        local name, realm = NS:SplitNameRealm(entry.name)
+        local key = provider and provider.GetPlayerKeyByName and provider:GetPlayerKeyByName(name, realm) or nil
+        if key then
+          if vote ~= "NEED" or not hasArmorPriority or armorPriority[key] then
+            votesByKey[key] = vote
+          end
         end
       end
     end
 
-    if not winner and counts.GREED > 0 then
-      for _, entry in ipairs(activeVoters) do
-        if getVoteForEntry(entry) == "GREED" then
-          winner = entry.name
-          break
-        end
-      end
-    elseif not winner and counts.TRANSMOG > 0 then
-      for _, entry in ipairs(activeVoters) do
-        if getVoteForEntry(entry) == "TRANSMOG" then
-          winner = entry.name
-          break
-        end
-      end
-    end
+    local winnerKey = LootEngine and LootEngine.ResolveWinner and LootEngine:ResolveWinner(votesByKey, provider, nil) or nil
+    local winnerName = winnerKey and provider and provider.GetPlayerName and provider:GetPlayerName(winnerKey) or nil
     local winnerArmor = "-"
-    if winner then
-      for _, entry in ipairs(activeVoters) do
-        if entry.name == winner then
-          winnerArmor = entry.armor or "-"
-          break
-        end
+    if winnerKey and provider and provider.GetPlayer then
+      local winnerPlayer = provider:GetPlayer(winnerKey)
+      if winnerPlayer then
+        winnerArmor = GetArmorForClass(winnerPlayer.class) or "-"
       end
     end
     local lootTypeDetail = GetLootTypeDetailed(itemLink)
     local lootArmorType = GetArmorTypeOnly(itemLink)
-    winnerLabel:SetText(string.format("Winner: %s | Armor: %s | Loot Armor: %s | Loot: %s", winner or "None", winnerArmor, lootArmorType, lootTypeDetail))
+    winnerText = string.format(
+      "Winner: %s | Armor: %s | Loot Armor: %s | Loot: %s",
+      winnerName or "None",
+      winnerArmor,
+      lootArmorType,
+      lootTypeDetail
+    )
 
     if GLD.UI and GLD.UI.ShowRollResultPopup then
-      local key = tostring(itemLink or "") .. ":" .. tostring(winner or "None")
+      local key = tostring(itemLink or "") .. ":" .. tostring(winnerName or "None")
       if self._lastTestResultKey ~= key then
         self._lastTestResultKey = key
         GLD.UI:ShowRollResultPopup({
           itemLink = itemLink,
           itemName = (itemLink and GetItemInfo(itemLink)) or nil,
-          winnerName = winner or "None",
+          winnerName = winnerName or "None",
         })
       end
     end
-  end
-  self.resultsScroll:AddChild(winnerLabel)
 
+    if manualSession and not manualSession.locked then
+      local votesByKey = {}
+      for _, entry in ipairs(activeVoters) do
+        local vote = getVoteForEntry(entry)
+        if vote == "NEED" and itemLink and not IsNeedAllowedForEntry(entry, itemLink) then
+          vote = "PASS"
+        end
+        if vote then
+          local key = nil
+          if entry.name and provider and provider.GetPlayerKeyByName then
+            local name, realm = NS:SplitNameRealm(entry.name)
+            key = provider:GetPlayerKeyByName(name, realm)
+          end
+          if not key and entry.name and NS.SplitNameRealm then
+            local name, realm = NS:SplitNameRealm(entry.name)
+            if name and realm then
+              key = name .. "-" .. realm
+            end
+          end
+          if key then
+            votesByKey[key] = vote
+          end
+        end
+      end
+      manualSession.votes = votesByKey
+      if GLD.CheckRollCompletion then
+        GLD:CheckRollCompletion(manualSession)
+      end
+    end
+  end
+  if self.resultsWinnerLabel then
+    self.resultsWinnerLabel:SetText(winnerText)
+  end
+
+  if self.resultsResetSoloBtn then
+    local showReset = self.disableManualVotes and not IsInGroup() and not IsInRaid()
+    self.resultsResetSoloBtn:SetShown(showReset)
+  end
+  local solo = IsSolo()
+  if self.resultsAbsentBtn then
+    self.resultsAbsentBtn:SetShown(solo)
+  end
+  if self.resultsRandomBtn then
+    self.resultsRandomBtn:SetShown(solo)
+  end
+
+  local rows = {}
   local lootType = GetLootTypeText(itemLink)
   for _, entry in ipairs(activeVoters) do
-    local row = AceGUI:Create("Label")
-    row:SetFullWidth(true)
     local vote = getVoteForEntry(entry) or "-"
     if vote == "NEED" and itemLink and not IsNeedAllowedForEntry(entry, itemLink) then
       vote = "NEED (ineligible)"
     end
-    local nameText = entry.name or "-"
-    local classText = entry.class or "-"
-    local armorText = entry.armor or "-"
-    local weaponText = entry.weapon or "-"
-    row:SetText(string.format("%s | %s | %s | %s | %s | %s",
-      nameText,
-      vote,
-      lootType or "-",
-      classText,
-      armorText,
-      weaponText
-    ))
-    self.resultsScroll:AddChild(row)
+    local queuePos, savedPos = getPositionsForEntry(entry)
+    local queueSort = tonumber(queuePos) or 99999
+    local normalized = NS:GetPlayerBaseName(entry.name) or (entry.name or "")
+    rows[#rows + 1] = {
+      name = NS:GetPlayerDisplayName(entry.name, entry.isGuest),
+      nameLower = (normalized or ""):lower(),
+      choice = vote,
+      queue = queuePos,
+      queueSort = queueSort,
+      frozen = savedPos,
+      loot = lootType or "-",
+      class = entry.class or "-",
+      armor = entry.armor or "-",
+      weapon = entry.weapon or "-",
+    }
+  end
+
+  table.sort(rows, function(a, b)
+    if a.queueSort ~= b.queueSort then
+      return a.queueSort < b.queueSort
+    end
+    return (a.nameLower or "") < (b.nameLower or "")
+  end)
+
+  if self.resultsScrollBox and CreateDataProvider then
+    local dataProvider = CreateDataProvider()
+    for _, rowData in ipairs(rows) do
+      dataProvider:Insert(rowData)
+    end
+    self.resultsScrollBox:SetDataProvider(dataProvider, true)
   end
 end
 
@@ -1430,8 +3395,10 @@ function TestUI:RefreshInstanceList()
       if not instanceID then
         break
       end
-      values[instanceID] = name
-      table.insert(order, instanceID)
+      if not values[instanceID] then
+        values[instanceID] = name
+        table.insert(order, instanceID)
+      end
       i = i + 1
     end
   end
@@ -1498,6 +3465,7 @@ function TestUI:SelectInstance(instanceID)
     instName = _G.EJ_GetInstanceInfo(instanceID)
   end
   self.selectedInstanceName = instName
+  EJ_Call("SetDifficultyID", 14)
   EJ_Call("SelectInstance", instanceID)
 
   local encounters = {}
@@ -1505,6 +3473,7 @@ function TestUI:SelectInstance(instanceID)
   self.encounterNameToId = {}
   self.encounterNameToIndex = {}
   self.encounterIdToIndex = {}
+  local seenEncounterIds = {}
   local i = 1
   while true do
     local a, b, c = EJ_Call("GetEncounterInfoByIndex", i, instanceID)
@@ -1524,7 +3493,8 @@ function TestUI:SelectInstance(instanceID)
       name = a
     end
 
-    if type(encounterID) == "number" then
+    if type(encounterID) == "number" and not seenEncounterIds[encounterID] then
+      seenEncounterIds[encounterID] = true
       local displayName = name or ("Encounter " .. encounterID)
       encounters[i] = displayName
       table.insert(order, i)
@@ -1661,25 +3631,81 @@ function TestUI:LoadEncounterLoot(retryCount)
 
   local index = 1
   local added = 0
+  local needsRetry = false
   while true do
     if numLoot and index > numLoot then
       break
     end
-    local itemInfo = { GetLootInfoByIndex(index) }
-    local info = itemInfo[1]
-    if type(info) == "table" then
-      itemInfo = info
-    end
-    if not itemInfo[1] and type(info) ~= "table" then
+    local rawInfo = { GetLootInfoByIndex(index) }
+    local info = rawInfo[1]
+    if not info then
       break
     end
 
-    local itemName, itemLink, itemQuality, itemLevel, _, _, _, _, icon = unpack(itemInfo)
+    local itemName = nil
+    local itemLink = nil
+    local itemQuality = nil
+    local itemLevel = nil
+    local icon = nil
+    local itemId = nil
     if type(info) == "table" then
-      itemName = info.name or itemName
-      itemLink = info.link or info.itemLink or itemLink
-      itemLevel = info.itemLevel or itemLevel
-      icon = info.icon or info.texture or icon
+      if type(info.name) == "string" then
+        itemName = info.name
+      end
+      if type(info.link) == "string" then
+        itemLink = info.link
+      elseif type(info.itemLink) == "string" then
+        itemLink = info.itemLink
+      end
+      if type(info.quality) == "number" then
+        itemQuality = info.quality
+      elseif type(info.itemQuality) == "number" then
+        itemQuality = info.itemQuality
+      end
+      if type(info.itemLevel) == "number" then
+        itemLevel = info.itemLevel
+      end
+      icon = info.icon or info.texture
+      itemId = info.itemId or info.itemID or info.id
+    else
+      for _, value in ipairs(rawInfo) do
+        if not itemId and type(value) == "number" then
+          itemId = value
+        elseif type(value) == "string" then
+          if not itemLink and (value:find("|Hitem:") or value:find("^item:")) then
+            itemLink = value
+          elseif not itemName then
+            itemName = value
+          end
+        end
+      end
+    end
+    if not itemLink and itemId then
+      itemLink = "item:" .. tostring(itemId)
+    end
+    if itemLink then
+      GLD:RequestItemData(itemLink)
+      local name, link, quality, level, _, _, _, _, iconInfo = GetItemInfo(itemLink)
+      if type(itemName) ~= "string" or itemName == "" then
+        itemName = name
+      end
+      if type(itemLink) ~= "string" or itemLink == "" then
+        itemLink = link or itemLink
+      else
+        itemLink = link or itemLink
+      end
+      if type(itemQuality) ~= "number" then
+        itemQuality = quality
+      end
+      if type(itemLevel) ~= "number" then
+        itemLevel = level
+      end
+      if not icon then
+        icon = iconInfo
+      end
+    end
+    if not itemName or not icon then
+      needsRetry = true
     end
     local row = AceGUI:Create("SimpleGroup")
     row:SetFullWidth(true)
@@ -1708,7 +3734,7 @@ function TestUI:LoadEncounterLoot(retryCount)
     row:AddChild(iconButton)
 
     local nameLabel = AceGUI:Create("InteractiveLabel")
-    local labelText = tostring(itemLink or itemName or "Unknown Item")
+    local labelText = tostring(itemName or itemLink or "Unknown Item")
     if itemLevel then
       labelText = string.format("%s |cff999999(ilvl %s)|r", labelText, itemLevel)
     end
@@ -1740,8 +3766,8 @@ function TestUI:LoadEncounterLoot(retryCount)
   GLD:Debug("LoadLoot: items added=" .. tostring(added))
 
   retryCount = retryCount or 0
-  if added == 0 and retryCount < 5 then
-    GLD:Debug("LoadLoot: no items yet, retrying " .. tostring(retryCount + 1))
+  if (added == 0 or needsRetry) and retryCount < 5 then
+    GLD:Debug("LoadLoot: items pending, retrying " .. tostring(retryCount + 1))
     C_Timer.After(0.3, function()
       TestUI:LoadEncounterLoot(retryCount + 1)
     end)
@@ -1755,8 +3781,13 @@ function TestUI:SimulateLootRoll(itemLink)
   if not self.testSessionActive then
     self:StartTestSession()
   end
+  local solo = IsSolo()
   local activeVoters = GetActiveVoters()
-  if (self.currentVoterIndex or 0) > (#activeVoters - 1) then
+  if not activeVoters or #activeVoters == 0 then
+    GLD:Print("No test players configured.")
+    return
+  end
+  if not solo and (self.currentVoterIndex or 0) > (#activeVoters - 1) then
     GLD:Print("All test voters completed. Use Reset Votes to start again.")
     return
   end
@@ -1781,9 +3812,21 @@ function TestUI:SimulateLootRoll(itemLink)
   local displayLink = link or normalized
   local displayName = name or "Test Item"
 
+  local itemContext = {
+    itemLink = displayLink,
+    itemName = displayName,
+    armorType = GetArmorTypeOnly(normalized),
+    lootType = GetLootTypeText(normalized),
+  }
+  if LootEngine and TestProvider then
+    local eligiblePlayers = LootEngine:BuildEligiblePlayers(itemContext, TestProvider)
+    LootEngine:ApplyRestrictions(eligiblePlayers, { queueEditEnabled = self.queueEditEnabled })
+    LootEngine:ComputeQueue(eligiblePlayers)
+  end
+
   local voterEntry = GetTestVoter((self.currentVoterIndex or 0) + 1)
   local canNeed = true
-  if voterEntry and voterEntry.class then
+  if not solo and voterEntry and voterEntry.class then
     canNeed = IsNeedAllowedForEntry(voterEntry, normalized)
   end
 
@@ -1800,32 +3843,42 @@ function TestUI:SimulateLootRoll(itemLink)
     canGreed = true,
     canTransmog = true,
     votes = {},
-    expectedVoters = GLD:BuildExpectedVoters(),
+    expectedVoters = nil,
     createdAt = GetServerTime(),
     isTest = true,
     testEncounterId = self.selectedEncounterID,
     testEncounterName = self.selectedEncounterName,
     testRaidName = self.selectedInstanceName,
   }
+  if TestProvider and TestProvider.BuildExpectedVoters then
+    session.expectedVoters = TestProvider:BuildExpectedVoters()
+  end
+  if not session.expectedVoters or #session.expectedVoters == 0 then
+    session.expectedVoters = solo and BuildSoloExpectedVoters(activeVoters) or GLD:BuildExpectedVoters()
+  end
 
   GLD.activeRolls[rollID] = session
   self.currentTestRollID = rollID
 
   if GLD.UI then
     local voter = nil
-    if IsInGroup() or IsInRaid() then
+    if not solo and (IsInGroup() or IsInRaid()) then
       local name, realm = UnitName("player")
       if name then
         voter = realm and realm ~= "" and (name .. "-" .. realm) or name
       end
     end
-    if not voter then
+    if not solo and not voter then
       voter = GetTestVoterName((self.currentVoterIndex or 0) + 1) or "Test Player"
     end
-    session.testVoterName = voter
-    GLD.UI:ShowRollPopup(session)
-    if GLD.UI.ShowPendingFrame then
-      GLD.UI:ShowPendingFrame()
+    if solo then
+      self:ShowSoloSimVotePopup(session, activeVoters)
+    else
+      session.testVoterName = voter
+      GLD.UI:ShowRollPopup(session)
+      if GLD.UI.ShowPendingFrame then
+        GLD.UI:ShowPendingFrame()
+      end
     end
   end
 
@@ -1867,47 +3920,19 @@ function TestUI:AdvanceTestVoter()
 end
 
 function TestUI:ToggleTestHistory()
-  if not AceGUI then
-    return
-  end
   if not GLD:IsAdmin() then
     GLD:Print("you do not have Guild Permission to access this panel")
     return
   end
-  if not self.testHistoryFrame then
-    self:CreateTestHistoryFrame()
-    self.testHistoryFrame:Show()
-    self:RefreshTestHistoryList()
-    self:RefreshTestHistoryDetails()
-    if self.testHistoryTree then
-      if self.testHistoryTree.RefreshTree then
-        self.testHistoryTree:RefreshTree()
-      end
-      if self.testHistoryTree.DoLayout then
-        self.testHistoryTree:DoLayout()
-      end
+  self:SetActiveAdminTab("history")
+  self:RefreshTestHistoryList()
+  self:RefreshTestHistoryDetails()
+  if self.testHistoryTree then
+    if self.testHistoryTree.RefreshTree then
+      self.testHistoryTree:RefreshTree()
     end
-    if self.testHistoryFrame and self.testHistoryFrame.DoLayout then
-      self.testHistoryFrame:DoLayout()
-    end
-    return
-  end
-  if self.testHistoryFrame:IsShown() then
-    self.testHistoryFrame:Hide()
-  else
-    self.testHistoryFrame:Show()
-    self:RefreshTestHistoryList()
-    self:RefreshTestHistoryDetails()
-    if self.testHistoryTree then
-      if self.testHistoryTree.RefreshTree then
-        self.testHistoryTree:RefreshTree()
-      end
-      if self.testHistoryTree.DoLayout then
-        self.testHistoryTree:DoLayout()
-      end
-    end
-    if self.testHistoryFrame and self.testHistoryFrame.DoLayout then
-      self.testHistoryFrame:DoLayout()
+    if self.testHistoryTree.DoLayout then
+      self.testHistoryTree:DoLayout()
     end
   end
 end
@@ -2005,8 +4030,8 @@ function TestUI:RefreshTestGraphs()
       local key = name .. "-" .. realm
       local wins = tonumber(entry.numAccepted or 0) or 0
       local attend = tonumber(entry.attendanceCount or 0) or 0
-      local dbKey = GLD:FindPlayerKeyByName(name, realm)
-      local fromDb = dbKey and GLD.db.players and GLD.db.players[dbKey] and "DB" or "Local"
+      local dbKey = GLD:FindTestPlayerKeyByName(name, realm)
+      local fromDb = dbKey and GLD.testDb and GLD.testDb.players and GLD.testDb.players[dbKey] and "TestDB" or "Local"
       local debugLine = AceGUI:Create("Label")
       debugLine:SetFullWidth(true)
       debugLine:SetText(string.format("%s (%s) | wins=%s | raids=%s | source=%s", name, key, wins, attend, fromDb))
@@ -2107,6 +4132,44 @@ function TestUI:RefreshTestGraphs()
   end
 end
 
+function TestUI:CreateTestHistoryPanel(parent)
+  if not AceGUI or not parent then
+    return
+  end
+  if self.testHistoryTree then
+    return
+  end
+
+  local tree = AceGUI:Create("TreeGroup")
+  tree:SetFullWidth(true)
+  tree:SetFullHeight(true)
+  tree:SetLayout("Fill")
+  if tree.EnableTreeResizing then
+    tree:EnableTreeResizing(false)
+  end
+  if tree.SetTreeWidth then
+    tree:SetTreeWidth(320, false)
+  end
+  if tree.EnableButtonTooltips then
+    tree:EnableButtonTooltips(false)
+  end
+  tree:SetCallback("OnGroupSelected", function(_, _, value)
+    self.testHistorySelectedId = value
+    self:RefreshTestHistoryDetails()
+  end)
+
+  tree.frame:SetParent(parent)
+  tree.frame:ClearAllPoints()
+  tree.frame:SetPoint("TOPLEFT", parent, "TOPLEFT", 6, -24)
+  tree.frame:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -6, 6)
+  tree.frame:Show()
+
+  self.testHistoryFrame = parent
+  self.testHistoryTree = tree
+  self.testHistoryDetailScroll = nil
+  self.testHistorySelectedId = nil
+end
+
 function TestUI:CreateTestHistoryFrame()
   local frame = AceGUI:Create("Frame")
   frame:SetTitle("Test Session History")
@@ -2146,7 +4209,7 @@ function TestUI:RefreshTestHistoryList()
     return
   end
 
-  local sessions = GLD.db.testSessions or {}
+  local sessions = GLD.testDb and GLD.testDb.testSessions or {}
   local treeData = {}
   if #sessions == 0 then
     self.testHistoryTree:SetTree(treeData)
@@ -2206,7 +4269,7 @@ function TestUI:RefreshTestHistoryDetails()
   self.testHistoryDetailScroll = detailScroll
 
   local selected = nil
-  for _, entry in ipairs(GLD.db.testSessions or {}) do
+  for _, entry in ipairs(GLD.testDb and GLD.testDb.testSessions or {}) do
     if entry.id == self.testHistorySelectedId then
       selected = entry
       break
@@ -2253,12 +4316,12 @@ function TestUI:RefreshTestHistoryDetails()
         shortName = nameOnly
       end
     end
-    if item.winnerKey and GLD.db.players and GLD.db.players[item.winnerKey] then
-      classFile = GLD.db.players[item.winnerKey].class
-    elseif shortName and GLD.FindPlayerKeyByName then
-      local key = GLD:FindPlayerKeyByName(shortName)
-      if key and GLD.db.players and GLD.db.players[key] then
-        classFile = GLD.db.players[key].class
+    if item.winnerKey and GLD.testDb and GLD.testDb.players and GLD.testDb.players[item.winnerKey] then
+      classFile = GLD.testDb.players[item.winnerKey].class
+    elseif shortName and GLD.FindTestPlayerKeyByName then
+      local key = GLD:FindTestPlayerKeyByName(shortName)
+      if key and GLD.testDb and GLD.testDb.players and GLD.testDb.players[key] then
+        classFile = GLD.testDb.players[key].class
       end
     end
     if classFile then
@@ -2405,3 +4468,4 @@ function TestUI:ShowTestHistorySummaryPopup(session)
   box:SetText(table.concat(lines, "\n"))
   frame:AddChild(box)
 end
+

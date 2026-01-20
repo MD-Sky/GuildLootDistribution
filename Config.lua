@@ -135,6 +135,52 @@ local function RegisterItemLabelWidget()
   AceGUI:RegisterWidgetType(ITEM_LABEL_WIDGET, Constructor, 1)
 end
 
+function GLD:ScheduleTrinketLootRefresh(scope)
+  if not C_Timer or not C_Timer.After then
+    return
+  end
+  scope = scope or "raids"
+  self._trinketLootRefresh = self._trinketLootRefresh or {}
+  if self._trinketLootRefresh[scope] then
+    return
+  end
+  local retryKey = "_trinketLootRetries_" .. scope
+  local retries = (self[retryKey] or 0) + 1
+  if retries > 10 then
+    return
+  end
+  self[retryKey] = retries
+  self._trinketLootRefresh[scope] = true
+  C_Timer.After(0.6, function()
+    self._trinketLootRefresh[scope] = nil
+    if scope == "raids" then
+      local ok = self:BuildTrinketLootRaidList()
+      if ok then
+        self[retryKey] = 0
+      else
+        self:ScheduleTrinketLootRefresh("raids")
+      end
+    else
+      local raidId = self:GetSelectedTrinketLootRaidId()
+      if raidId then
+        local encounters = self:GetTrinketLootEncountersForRaid(raidId)
+        if encounters then
+          self[retryKey] = 0
+        else
+          self:ScheduleTrinketLootRefresh("encounters")
+        end
+      end
+    end
+    if self.options then
+      self:RefreshTrinketRoleOptions(self.options)
+    end
+    local AceConfigRegistry = LibStub("AceConfigRegistry-3.0", true)
+    if AceConfigRegistry then
+      AceConfigRegistry:NotifyChange("GuildLoot")
+    end
+  end)
+end
+
 function GLD:GetTrinketRole(itemId)
   if not itemId then
     return { RANGEDPS = true }
@@ -215,6 +261,7 @@ function GLD:BuildTrinketLootRaidList()
   end
   local ok, msg = self:EnsureEncounterJournalReady()
   if not ok then
+    self:ScheduleTrinketLootRefresh("raids")
     return false, msg
   end
 
@@ -223,6 +270,10 @@ function GLD:BuildTrinketLootRaidList()
   local values = {}
   local order = {}
   local tiers = EJ_Call("GetNumTiers") or 0
+  if tiers == 0 then
+    self:ScheduleTrinketLootRefresh("raids")
+    return false, "Encounter Journal: no tiers yet"
+  end
   for tier = 1, tiers do
     EJ_Call("SelectTier", tier)
     local i = 1
@@ -231,10 +282,17 @@ function GLD:BuildTrinketLootRaidList()
       if not instanceID then
         break
       end
-      values[instanceID] = name
-      table.insert(order, instanceID)
+      if not values[instanceID] then
+        values[instanceID] = name
+        table.insert(order, instanceID)
+      end
       i = i + 1
     end
+  end
+
+  if #order == 0 then
+    self:ScheduleTrinketLootRefresh("raids")
+    return false, "Encounter Journal: no raids found"
   end
 
   trinketLootCache.raids = values
@@ -248,12 +306,18 @@ function GLD:BuildTrinketLootRaidList()
 end
 
 function GLD:GetTrinketLootRaidValues()
-  self:BuildTrinketLootRaidList()
+  local ok = self:BuildTrinketLootRaidList()
+  if not ok then
+    self:ScheduleTrinketLootRefresh("raids")
+  end
   return trinketLootCache.raids or {}
 end
 
 function GLD:GetTrinketLootRaidOrder()
-  self:BuildTrinketLootRaidList()
+  local ok = self:BuildTrinketLootRaidList()
+  if not ok then
+    self:ScheduleTrinketLootRefresh("raids")
+  end
   return trinketLootCache.order or {}
 end
 
@@ -303,6 +367,7 @@ function GLD:GetTrinketLootEncountersForRaid(raidId)
   EJ_Call("SelectInstance", raidId)
 
   local encounters = {}
+  local seenEncounterIds = {}
   local i = 1
   while true do
     local a, b, c = EJ_Call("GetEncounterInfoByIndex", i, raidId)
@@ -322,7 +387,8 @@ function GLD:GetTrinketLootEncountersForRaid(raidId)
       name = a
     end
 
-    if encounterID then
+    if encounterID and not seenEncounterIds[encounterID] then
+      seenEncounterIds[encounterID] = true
       table.insert(encounters, {
         id = encounterID,
         index = i,
@@ -330,6 +396,10 @@ function GLD:GetTrinketLootEncountersForRaid(raidId)
       })
     end
     i = i + 1
+  end
+
+  if #encounters == 0 then
+    return nil, "Encounter Journal: encounters not available yet"
   end
 
   trinketLootCache.encountersByRaid[raidId] = encounters
@@ -362,6 +432,13 @@ function GLD:GetEncounterTrinketLinks(raidId, encounter)
 
   EJ_Call("SetDifficultyID", TRINKET_DIFFICULTY_ID)
   EJ_Call("SelectInstance", raidId)
+  EJ_Call("SetLootFilter", 0)
+  if C_EncounterJournal and C_EncounterJournal.ResetLootFilter then
+    C_EncounterJournal.ResetLootFilter()
+  end
+  if _G.EJ_ResetLootFilter then
+    _G.EJ_ResetLootFilter()
+  end
   if encounter.id then
     EJ_Call("SelectEncounter", encounter.id)
   elseif encounter.index then
@@ -381,20 +458,43 @@ function GLD:GetEncounterTrinketLinks(raidId, encounter)
     if numLoot and index > numLoot then
       break
     end
-    local itemInfo = { GetLootInfoByIndex(index, encounter.id, encounter.index) }
-    local info = itemInfo[1]
-    if type(info) == "table" then
-      itemInfo = info
-    end
-    if not itemInfo[1] and type(info) ~= "table" then
+    local rawInfo = { GetLootInfoByIndex(index, encounter.id, encounter.index) }
+    local info = rawInfo[1]
+    if not info then
       break
     end
 
-    local itemID = itemInfo.itemID or itemInfo[1]
+    local itemID = nil
+    local itemLink = nil
+    if type(info) == "table" then
+      itemID = info.itemId or info.itemID or info.id
+      if type(info.link) == "string" then
+        itemLink = info.link
+      elseif type(info.itemLink) == "string" then
+        itemLink = info.itemLink
+      end
+    else
+      for _, value in ipairs(rawInfo) do
+        if not itemID and type(value) == "number" then
+          itemID = value
+        elseif type(value) == "string" then
+          if not itemLink and (value:find("|Hitem:") or value:find("^item:")) then
+            itemLink = value
+          end
+        end
+      end
+    end
+    if not itemID and itemLink then
+      itemID = tonumber(itemLink:match("item:(%d+)"))
+    end
+
     if itemID then
       local _, _, _, equipLoc = C_Item.GetItemInfoInstant(itemID)
       if equipLoc == "INVTYPE_TRINKET" then
         local link = select(2, GetItemInfo(itemID))
+        if not link and itemLink then
+          link = itemLink
+        end
         if not link then
           link = "item:" .. tostring(itemID)
         end
@@ -447,6 +547,7 @@ end
 function GLD:BuildTrinketRoleOptions()
   local ok, msg = self:BuildTrinketLootRaidList()
   if not ok then
+    self:ScheduleTrinketLootRefresh("raids")
     return {
       status = {
         type = "description",
@@ -469,6 +570,7 @@ function GLD:BuildTrinketRoleOptions()
 
   local encounters, err = self:GetTrinketLootEncountersForRaid(raidId)
   if not encounters then
+    self:ScheduleTrinketLootRefresh("encounters")
     return {
       status = {
         type = "description",
@@ -560,7 +662,7 @@ function GLD:RefreshTrinketRoleOptions(options)
     type = "group",
     name = "Boss / Trinket / Role",
     inline = true,
-    order = 3,
+    order = 4,
     args = self:BuildTrinketRoleOptions(),
   }
 end
@@ -602,7 +704,7 @@ function GLD:InitConfig()
           debugLogs = {
             type = "toggle",
             name = "Enable debug logs",
-            desc = "Show debug messages in chat (off by default).",
+            desc = "Log debug messages to the debug window (/glddebug).",
             get = function() return GLD.db.config.debugLogs == true end,
             set = function(_, val) GLD.db.config.debugLogs = val and true or false end,
             hidden = function() return not GLD:IsAdmin() end,
@@ -615,10 +717,26 @@ function GLD:InitConfig()
         name = "Customise Trinket Loot",
         order = 2,
         args = {
-          info = {
-            type = "description",
-            name = "Configure custom trinket loot settings here.",
+          loadRaid = {
+            type = "execute",
+            name = "Load resources",
+            desc = "Reload raid and encounter data from the Encounter Journal.",
             order = 1,
+            width = "full",
+            func = function()
+              trinketLootCache.raids = nil
+              trinketLootCache.order = nil
+              trinketLootCache.raidsByName = nil
+              trinketLootCache.encountersByRaid = {}
+              trinketLootCache.trinketByEncounter = {}
+              GLD:ScheduleTrinketLootRefresh("raids")
+              GLD:ScheduleTrinketLootRefresh("encounters")
+              GLD:RefreshTrinketRoleOptions(options)
+              local AceConfigRegistry = LibStub("AceConfigRegistry-3.0", true)
+              if AceConfigRegistry then
+                AceConfigRegistry:NotifyChange("GuildLoot")
+              end
+            end,
           },
           raidSelect = {
             type = "select",
@@ -635,6 +753,13 @@ function GLD:InitConfig()
               end
             end,
             order = 2,
+            width = "full",
+          },
+          info = {
+            type = "description",
+            name = "Configure custom trinket loot settings here.",
+            order = 3,
+            width = "full",
           },
         },
       },

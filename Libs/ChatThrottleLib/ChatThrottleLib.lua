@@ -12,6 +12,10 @@ if not CTL then
   return
 end
 
+-- Ensure full ChatThrottleLib versions can safely replace this stub.
+CTL.version = 0
+CTL.securelyHooked = true
+
 local SendAddonMessageFunc = (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
 local SendChatMessageFunc = SendChatMessage
 

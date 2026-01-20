@@ -77,6 +77,12 @@ UI/TestUI.lua         - Test panel and graphs
 UI/HistoryUI.lua      - Raid history viewer
 ```
 
+### To Test
+- Snapshot broadcast reaches party members when not in a raid
+- Test roll cleanup runs periodically without affecting live rolls
+- Loot history mismatch detection still catches vote discrepancies
+- Solo simulate-items uses the consolidated vote popup and records all test player votes
+
 ### Class/Spec System
 
 The addon includes a comprehensive database of all WoW classes with their specs, armor types, and weapon preferences:
