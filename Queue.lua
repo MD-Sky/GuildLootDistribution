@@ -42,14 +42,16 @@ local function ClearHoldPos(player)
   player.savedPos = nil
 end
 
-function GLD:RemoveFromQueue(key)
+function GLD:RemoveFromQueue(key, skipRevision)
   if not key then
-    return
+    return false
   end
   self.db.queue = self.db.queue or {}
+  local removed = false
   for i, k in ipairs(self.db.queue) do
     if k == key then
       table.remove(self.db.queue, i)
+      removed = true
       break
     end
   end
@@ -57,14 +59,18 @@ function GLD:RemoveFromQueue(key)
   if player then
     player.queuePos = nil
   end
-  if self.CompactQueue then
+  if removed and self.CompactQueue then
     self:CompactQueue()
   end
+  if removed and not skipRevision and self.MarkDBChanged then
+    self:MarkDBChanged("queue_remove")
+  end
+  return removed
 end
 
-function GLD:InsertToQueue(key, position)
+function GLD:InsertToQueue(key, position, skipRevision)
   if not key then
-    return
+    return false
   end
   self.db.queue = self.db.queue or {}
   local count = #self.db.queue
@@ -74,6 +80,10 @@ function GLD:InsertToQueue(key, position)
   end
   table.insert(self.db.queue, pos, key)
   self:CompactQueue()
+  if not skipRevision and self.MarkDBChanged then
+    self:MarkDBChanged("queue_insert")
+  end
+  return true
 end
 
 function GLD:CompactQueue()
@@ -104,11 +114,11 @@ end
 
 function GLD:SetAttendance(key, state)
   if not key then
-    return
+    return false
   end
   local player = self.db.players[key]
   if not player then
-    return
+    return false
   end
 
   local normalized = NormalizeAttendanceState(state)
@@ -126,10 +136,13 @@ function GLD:SetAttendance(key, state)
       if player.queuePos then
         SetHoldPos(player, player.queuePos)
       end
-      self:RemoveFromQueue(key)
+      self:RemoveFromQueue(key, true)
     end
     player.attendance = "Absent"
-    return
+    if current ~= "Absent" and self.MarkDBChanged then
+      self:MarkDBChanged("attendance_absent")
+    end
+    return current ~= "Absent"
   end
 
   if current == "Absent" then
@@ -139,12 +152,19 @@ function GLD:SetAttendance(key, state)
       desiredPos = holdPos
     end
     player.attendance = "Present"
-    self:InsertToQueue(key, desiredPos)
+    self:InsertToQueue(key, desiredPos, true)
     ClearHoldPos(player)
-    return
+    if self.MarkDBChanged then
+      self:MarkDBChanged("attendance_present")
+    end
+    return true
   end
 
   player.attendance = "Present"
+  if current ~= "Present" and self.MarkDBChanged then
+    self:MarkDBChanged("attendance_present")
+  end
+  return current ~= "Present"
 end
 
 function GLD:EnsureQueuePositions()
@@ -166,22 +186,28 @@ function GLD:MoveToQueueBottom(key)
   if not key then
     return
   end
-  self:RemoveFromQueue(key)
-  self:InsertToQueue(key)
+  local removed = self:RemoveFromQueue(key, true)
+  local inserted = self:InsertToQueue(key, nil, true)
+  if (removed or inserted) and self.MarkDBChanged then
+    self:MarkDBChanged("queue_move_bottom")
+  end
 end
 
 function GLD:MoveToQueueMiddle(key)
   if not key then
     return
   end
-  self:RemoveFromQueue(key)
+  local removed = self:RemoveFromQueue(key, true)
   self.db.queue = self.db.queue or {}
   local count = #self.db.queue
   local pos = math.floor((count + 1) / 2)
   if pos < 1 then
     pos = 1
   end
-  self:InsertToQueue(key, pos)
+  local inserted = self:InsertToQueue(key, pos, true)
+  if (removed or inserted) and self.MarkDBChanged then
+    self:MarkDBChanged("queue_move_middle")
+  end
 end
 
 function GLD:OnAwardedItem(key)
@@ -198,6 +224,9 @@ function GLD:OnAwardedItem(key)
   player.attendance = NormalizeAttendanceState(player.attendance) or "Present"
   player.numAccepted = (player.numAccepted or 0) + 1
   self:MoveToQueueBottom(key)
+  if self.MarkDBChanged then
+    self:MarkDBChanged("award_item")
+  end
   return true
 end
 
@@ -207,7 +236,7 @@ function GLD:RemovePlayerFromDatabase(key)
   end
 
   if self.RemoveFromQueue then
-    self:RemoveFromQueue(key)
+    self:RemoveFromQueue(key, true)
   end
 
   if self.db.queue then
@@ -226,6 +255,9 @@ function GLD:RemovePlayerFromDatabase(key)
 
   if self.CompactQueue then
     self:CompactQueue()
+  end
+  if self.MarkDBChanged then
+    self:MarkDBChanged("player_remove")
   end
 
   return true

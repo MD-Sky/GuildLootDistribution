@@ -1663,12 +1663,15 @@ function GLD:CreateBottomBar(frame)
     end
   end
 
-  local function RequireAuthorityAccess(action)
+  local function RequireAuthorityAccess(action, requestAction)
     if self.CanMutateState and self:CanMutateState() then
       action()
-    else
-      self:Print("you do not have Guild Permission to access this panel")
+      return
     end
+    if requestAction and self.RequestAdminAction and self:RequestAdminAction(requestAction) then
+      return
+    end
+    self:Print("you do not have Guild Permission to access this panel")
   end
 
   local buttonSpacing = 6
@@ -1697,34 +1700,34 @@ function GLD:CreateBottomBar(frame)
   buttons[#buttons].requiresAuthority = false
   buttons[#buttons].hideWhenNoAuthority = false
   buttons[#buttons + 1] = CreateActionButton("Admin", 70, function()
-    RequireAuthorityAccess(function()
+    RequireAdminAccess(function()
       if ui.OpenAdmin then
         ui:OpenAdmin()
       end
     end)
   end)
-  buttons[#buttons].requiresAuthority = true
-  buttons[#buttons].hideWhenNoAuthority = true
+  buttons[#buttons].requiresAuthority = false
+  buttons[#buttons].hideWhenNoAuthority = false
   buttons[#buttons + 1] = CreateActionButton("End Session", 100, function()
     RequireAuthorityAccess(function()
       if self.EndSession then
         self:EndSession()
       end
       ui:RefreshMain()
-    end)
+    end, "END_SESSION")
   end)
-  buttons[#buttons].requiresAuthority = true
-  buttons[#buttons].hideWhenNoAuthority = true
+  buttons[#buttons].requiresAuthority = false
+  buttons[#buttons].hideWhenNoAuthority = false
   buttons[#buttons + 1] = CreateActionButton("Start Session", 100, function()
     RequireAuthorityAccess(function()
       if self.StartSession then
         self:StartSession()
       end
       ui:RefreshMain()
-    end)
+    end, "START_SESSION")
   end)
-  buttons[#buttons].requiresAuthority = true
-  buttons[#buttons].hideWhenNoAuthority = true
+  buttons[#buttons].requiresAuthority = false
+  buttons[#buttons].hideWhenNoAuthority = false
   buttons[#buttons + 1] = CreateActionButton("Guest Anchors", 110, function()
     RequireAuthorityAccess(function()
       ui.guestAnchorsVisible = not ui.guestAnchorsVisible
@@ -1732,7 +1735,7 @@ function GLD:CreateBottomBar(frame)
     end)
   end)
   buttons[#buttons].requiresAuthority = true
-  buttons[#buttons].hideWhenNoAuthority = true
+  buttons[#buttons].hideWhenNoAuthority = false
 
   local previous = nil
   for _, button in ipairs(buttons) do
@@ -1804,8 +1807,11 @@ function GLD:UpdateBottomBarPermissions()
   local canAccessAdmin = self.CanAccessAdminUI and self:CanAccessAdminUI() or false
   local canMutate = self.CanMutateState and self:CanMutateState() or false
   for _, button in ipairs(ui.adminButtons) do
-    if button and button.hideWhenNoAuthority then
-      local show = canMutate
+    if button then
+      local show = canAccessAdmin
+      if show and button.hideWhenNoAuthority then
+        show = canMutate
+      end
       if button.SetShown then
         button:SetShown(show)
       elseif show then
@@ -1813,13 +1819,13 @@ function GLD:UpdateBottomBarPermissions()
       else
         button:Hide()
       end
-    end
-    if button and button.SetEnabled then
-      local allow = canAccessAdmin
-      if button.requiresAuthority then
-        allow = canMutate
+      if button.SetEnabled then
+        local allow = canAccessAdmin
+        if button.requiresAuthority then
+          allow = canMutate
+        end
+        button:SetEnabled(allow)
       end
-      button:SetEnabled(allow)
     end
   end
   if ui.toggleGuestsBtn and ui.toggleGuestsBtn.SetEnabled then
@@ -2000,14 +2006,29 @@ end
 
 function GLD:GetRosterSource()
   if self:IsAuthority() then
-    return (self.db and self.db.players) or {}
-  end
-  if self.CanAccessAdminUI and self:CanAccessAdminUI() then
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      if self._lastRosterSourceLabel ~= "db.players" then
+        self._lastRosterSourceLabel = "db.players"
+        self:Debug("Roster source: db.players (authority)")
+      end
+    end
     return (self.db and self.db.players) or {}
   end
   local roster = self.shadow and self.shadow.roster or nil
   if type(roster) == "table" and next(roster) ~= nil then
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      if self._lastRosterSourceLabel ~= "shadow.roster" then
+        self._lastRosterSourceLabel = "shadow.roster"
+        self:Debug("Roster source: shadow.roster")
+      end
+    end
     return roster
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    if self._lastRosterSourceLabel ~= "db.players_fallback" then
+      self._lastRosterSourceLabel = "db.players_fallback"
+      self:Debug("Roster source: db.players (fallback)")
+    end
   end
   return (self.db and self.db.players) or {}
 end
@@ -2785,6 +2806,10 @@ function UI:SubmitRollVote(session, vote, advanceTest)
   end
   if GLD.IsDebugEnabled and GLD:IsDebugEnabled() then
     GLD:Debug("Vote sent: rollID=" .. tostring(session.rollID) .. " vote=" .. tostring(vote))
+  end
+  if GLD.TraceStep then
+    local itemLabel = session.itemLink or session.itemName or "Item"
+    GLD:TraceStep("Vote submitted: " .. tostring(vote) .. " for " .. tostring(itemLabel))
   end
 
   if session.locked then

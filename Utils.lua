@@ -10,6 +10,34 @@ local ROLE_ICON_TCOORDS = {
   NONE = {0, 0, 0, 0},
 }
 
+local function IsFlagTrue(value)
+  if value == true then
+    return true
+  end
+  local valueType = type(value)
+  if valueType == "number" then
+    return value ~= 0
+  end
+  if valueType == "string" then
+    local lowered = value:lower()
+    return lowered == "true" or lowered == "1" or lowered == "yes"
+  end
+  return false
+end
+
+local function GetRankName(index)
+  if index == nil then
+    return nil
+  end
+  if C_GuildInfo and C_GuildInfo.GuildControlGetRankName then
+    return C_GuildInfo.GuildControlGetRankName(index)
+  end
+  if GuildControlGetRankName then
+    return GuildControlGetRankName(index)
+  end
+  return nil
+end
+
 function NS:SplitNameRealm(name)
   if not name or name == "" then
     return nil, nil
@@ -61,6 +89,101 @@ function GLD:GetOurGuildName()
   return nil
 end
 
+function GLD:GetGuildRankFlags(rankIndex, rankName)
+  if rankIndex == nil then
+    return nil
+  end
+  if C_GuildInfo and C_GuildInfo.GuildControlGetRankFlags then
+    local flags = C_GuildInfo.GuildControlGetRankFlags(rankIndex)
+    local altFlags = C_GuildInfo.GuildControlGetRankFlags(rankIndex + 1)
+    if rankName then
+      local nameAtIndex = GetRankName(rankIndex)
+      local nameAtAlt = GetRankName(rankIndex + 1)
+      if nameAtIndex and nameAtIndex == rankName then
+        return flags
+      end
+      if nameAtAlt and nameAtAlt == rankName then
+        return altFlags
+      end
+    end
+    if flags and not altFlags then
+      return flags
+    end
+    if altFlags and not flags then
+      return altFlags
+    end
+    if type(flags) == "table" and (IsFlagTrue(flags.isOfficer) or IsFlagTrue(flags.isGM)) then
+      return flags
+    end
+    if type(altFlags) == "table" and (IsFlagTrue(altFlags.isOfficer) or IsFlagTrue(altFlags.isGM)) then
+      return altFlags
+    end
+    return flags or altFlags
+  end
+  return nil
+end
+
+function GLD:IsGuildRankOfficerOrGM(rankIndex, rankName)
+  if rankIndex == nil then
+    return false, false
+  end
+  local isGuildMaster = rankIndex == 0
+  local rankHasIsOfficerFlag = false
+  local flags = self:GetGuildRankFlags(rankIndex, rankName)
+  if type(flags) == "table" then
+    if flags.isOfficer ~= nil then
+      rankHasIsOfficerFlag = IsFlagTrue(flags.isOfficer)
+    end
+    if flags.isGM ~= nil then
+      isGuildMaster = isGuildMaster or IsFlagTrue(flags.isGM)
+    end
+  end
+  if not rankHasIsOfficerFlag and not isGuildMaster then
+    if C_GuildInfo and C_GuildInfo.IsGuildOfficer then
+      rankHasIsOfficerFlag = IsFlagTrue(C_GuildInfo.IsGuildOfficer())
+    elseif IsGuildOfficer then
+      rankHasIsOfficerFlag = IsFlagTrue(IsGuildOfficer())
+    end
+  end
+  return rankHasIsOfficerFlag, isGuildMaster
+end
+
+function GLD:IsLocalGuildOfficerOrGM()
+  if not IsInGuild() then
+    return false, false, false, nil, nil
+  end
+  local _, rankName, rankIndex = GetGuildInfo("player")
+  if rankIndex == nil then
+    return false, false, false, nil, rankName
+  end
+  local rankHasIsOfficerFlag, isGuildMaster = self:IsGuildRankOfficerOrGM(rankIndex, rankName)
+  local canSee = isGuildMaster or rankHasIsOfficerFlag
+  return canSee, rankHasIsOfficerFlag, isGuildMaster, rankIndex, rankName
+end
+
+function GLD:CanLocalSeeAdminUI()
+  if self.IsGuest and self:IsGuest("player") then
+    return false
+  end
+  local canSee, rankHasIsOfficerFlag, isGuildMaster, rankIndex, rankName = self:IsLocalGuildOfficerOrGM()
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    local stamp = table.concat({
+      tostring(rankIndex),
+      tostring(rankName),
+      tostring(rankHasIsOfficerFlag),
+      tostring(isGuildMaster),
+      tostring(canSee),
+    }, "|")
+    if self._lastAdminPermissionStamp ~= stamp then
+      self._lastAdminPermissionStamp = stamp
+      self:Debug("Admin permission: rankIndex=" .. tostring(rankIndex) .. " rankName=" .. tostring(rankName))
+      self:Debug("Admin permission: isOfficerFlag=" .. tostring(rankHasIsOfficerFlag) .. " isGuildMaster=" .. tostring(isGuildMaster))
+      self:Debug("Admin permission: canSeeAdminUI=" .. tostring(canSee))
+    end
+  end
+  return canSee
+end
+
 function GLD:IsGuest(unitOrMember)
   local ourGuild = self:GetOurGuildName()
   if type(unitOrMember) == "table" then
@@ -92,6 +215,44 @@ function GLD:IsGuest(unitOrMember)
   end
 
   return false
+end
+
+function GLD:IsGuestEntry(player)
+  if not player then
+    return false
+  end
+  if player.isGuest ~= nil then
+    return player.isGuest == true
+  end
+  return player.source == "guest"
+end
+
+function GLD:GetDBPlayerForUnit(unit)
+  if not unit or not UnitExists(unit) then
+    return nil, nil
+  end
+  if not self.db or not self.db.players then
+    return nil, nil
+  end
+  local key = NS:GetPlayerKeyFromUnit(unit)
+  if key and self.db.players[key] then
+    return self.db.players[key], key
+  end
+  local name, realm = UnitName(unit)
+  if name and self.FindPlayerKeyByName then
+    local lookup = self:FindPlayerKeyByName(name, realm)
+    if lookup and self.db.players[lookup] then
+      return self.db.players[lookup], lookup
+    end
+  end
+  local fullName = self:GetUnitFullName(unit)
+  if fullName and self.db.players[fullName] then
+    return self.db.players[fullName], fullName
+  end
+  if name and self.db.players[name] then
+    return self.db.players[name], name
+  end
+  return nil, nil
 end
 
 function GLD:GetGuidForSender(sender)
@@ -132,17 +293,95 @@ function GLD:GetGuidForSender(sender)
   return nil
 end
 
-function GLD:MaybeWelcomeGuest(unit, fullName)
+function GLD:GetUnitForSender(sender)
+  if not sender or sender == "" then
+    return nil
+  end
+  local base, realm = NS:SplitNameRealm(sender)
+  if not base then
+    return nil
+  end
+  local fullName = (realm and realm ~= "") and (base .. "-" .. realm) or base
+
+  local function matches(unit)
+    if not UnitExists(unit) then
+      return false
+    end
+    local name, unitRealm = UnitName(unit)
+    if not name then
+      return false
+    end
+    local unitFull = (unitRealm and unitRealm ~= "") and (name .. "-" .. unitRealm) or name
+    return unitFull == fullName or name == sender
+  end
+
+  if matches("player") then
+    return "player"
+  end
+
+  if IsInRaid() then
+    for i = 1, GetNumGroupMembers() do
+      local unit = "raid" .. i
+      if matches(unit) then
+        return unit
+      end
+    end
+  end
+
+  return nil
+end
+
+function GLD:IsSenderInRaid(sender)
+  if not IsInRaid() then
+    return false
+  end
+  local unit = self:GetUnitForSender(sender)
+  return unit ~= nil
+end
+
+function GLD:ValidateAdminRequestSender(sender, actionLabel)
+  if not sender or sender == "" then
+    return false, "missing sender"
+  end
+  if not IsInRaid() then
+    return false, "not in raid"
+  end
+  local unit = self:GetUnitForSender(sender)
+  if not unit then
+    return false, "sender not in raid"
+  end
+  local _, rankName, rankIndex = GetGuildInfo(unit)
+  if rankIndex == nil then
+    return false, "no guild rank"
+  end
+  local rankHasIsOfficerFlag, isGuildMaster = self:IsGuildRankOfficerOrGM(rankIndex, rankName)
+  if not (rankHasIsOfficerFlag or isGuildMaster) then
+    return false, "not officer"
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug(
+      "Admin request accepted: sender="
+        .. tostring(sender)
+        .. " action="
+        .. tostring(actionLabel)
+        .. " rankIndex="
+        .. tostring(rankIndex)
+        .. " rankName="
+        .. tostring(rankName)
+    )
+  end
+  return true, nil
+end
+
+function GLD:MaybeWelcomeGuest(unit, fullName, playerKey, playerEntry)
   if not unit or not UnitExists(unit) or not UnitIsConnected(unit) then
     return
   end
   if UnitIsUnit(unit, "player") then
     return
   end
-  if not self:GetOurGuildName() then
-    return
-  end
-  if not self:IsGuest(unit) then
+  playerEntry = playerEntry or (self.GetDBPlayerForUnit and select(1, self:GetDBPlayerForUnit(unit))) or nil
+  if not playerEntry or not self:IsGuestEntry(playerEntry) then
     return
   end
 
@@ -175,18 +414,33 @@ function GLD:WelcomeGuestsFromGroup()
     return
   end
 
-  local function visit(unit)
-    if not UnitExists(unit) then
-      return
-    end
-    local fullName = self:GetUnitFullName(unit)
-    if fullName then
-      self:MaybeWelcomeGuest(unit, fullName)
+  local recipients = {}
+  for i = 1, GetNumGroupMembers() do
+    local unit = "raid" .. i
+    if UnitExists(unit) and UnitIsConnected(unit) and not UnitIsUnit(unit, "player") then
+      local playerEntry, playerKey = self:GetDBPlayerForUnit(unit)
+      if playerEntry and self:IsGuestEntry(playerEntry) then
+        local fullName = self:GetUnitFullName(unit)
+        if fullName then
+          recipients[#recipients + 1] = {
+            unit = unit,
+            fullName = fullName,
+            playerKey = playerKey,
+            playerEntry = playerEntry,
+          }
+        end
+      end
     end
   end
 
-  for i = 1, GetNumGroupMembers() do
-    visit("raid" .. i)
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug("Guest welcome recipients: " .. tostring(#recipients))
+  end
+  for _, entry in ipairs(recipients) do
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug("Guest welcome target: " .. tostring(entry.fullName) .. " isGuest=true")
+    end
+    self:MaybeWelcomeGuest(entry.unit, entry.fullName, entry.playerKey, entry.playerEntry)
   end
 end
 
@@ -240,10 +494,10 @@ function GLD:RebuildGroupRoster()
 end
 
 function GLD:CanAccessAdminUI()
-  if self:IsGuest("player") then
-    return false
+  if self.CanLocalSeeAdminUI then
+    return self:CanLocalSeeAdminUI()
   end
-  return self:IsAdmin()
+  return false
 end
 
 function GLD:CanMutateState()
@@ -370,7 +624,9 @@ function GLD:UpsertPlayerFromUnit(unit)
   local name, realm = UnitName(unit)
   local classFile = select(2, UnitClass(unit))
   local player = self.db.players[key]
+  local isNew = false
   if not player then
+    isNew = true
     player = {
       name = name,
       realm = realm or GetRealmName(),
@@ -386,12 +642,15 @@ function GLD:UpsertPlayerFromUnit(unit)
       attendanceCount = 0,
     }
     self.db.players[key] = player
+    if self.MarkDBChanged then
+      self:MarkDBChanged("player_add")
+    end
   else
     player.name = name or player.name
     player.realm = realm or player.realm
     player.class = classFile or player.class
   end
-  return key
+  return key, isNew
 end
 
 function GLD:AddGuestFromUnit(unit)
@@ -438,6 +697,9 @@ function GLD:AddGuestFromUnit(unit)
   player.source = "guest"
 
   self:EnsureQueuePositions()
+  if self.MarkDBChanged then
+    self:MarkDBChanged("guest_add")
+  end
   self:BroadcastSnapshot()
   if self.UI then
     self.UI:RefreshMain()
@@ -508,6 +770,9 @@ function GLD:RefreshFromGuildRoster()
 
     self:AutoMarkCurrentGroup()
     self:EnsureQueuePositions()
+    if self.MarkDBChanged then
+      self:MarkDBChanged("guild_roster_refresh")
+    end
     self:BroadcastSnapshot()
     if self.UI then
       self.UI:RefreshMain()
@@ -520,6 +785,9 @@ end
 
 function GLD:UpdateGuestAttendanceFromGroup()
   if not self.db or not self.db.players then
+    return
+  end
+  if not IsInRaid() then
     return
   end
 

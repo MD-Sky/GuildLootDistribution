@@ -137,6 +137,29 @@ function GLD:BroadcastActiveRollsSnapshot(targets)
   end
 end
 
+function GLD:ForcePendingVotesWindow()
+  if not self:IsAuthority() then
+    return false
+  end
+  if not IsInRaid() then
+    return false
+  end
+  if self.BroadcastActiveRollsSnapshot then
+    self:BroadcastActiveRollsSnapshot()
+  end
+  local payload = {
+    authorityGUID = self:GetAuthorityGUID(),
+    authorityName = self:GetAuthorityName(),
+    requestedAt = GetServerTime(),
+  }
+  self:SendCommMessageSafe(NS.MSG.FORCE_PENDING, payload, "RAID")
+  if self.UI and self.UI.ShowPendingFrame then
+    self.UI:ShowPendingFrame()
+  end
+  self:TraceStep("Force pending votes window sent to raid.")
+  return true
+end
+
 function GLD:CleanupActiveRolls(maxAgeSeconds)
   if not self.activeRolls then
     return
@@ -741,16 +764,23 @@ function GLD:NoteMismatch(session, playerName, expectedVote, actualVote)
   end
 end
 
-function GLD:OnStartLootRoll(rollID, rollTime, lootHandle)
+function GLD:OnStartLootRoll(event, rollID, rollTime, lootHandle)
+  local debugEnabled = self:IsDebugEnabled()
+  if type(rollID) ~= "number" then
+    if debugEnabled then
+      self:Debug("Ignoring START_LOOT_ROLL (invalid rollID): event=" .. tostring(event) .. " rollID=" .. tostring(rollID))
+    end
+    return
+  end
   if not IsInRaid() or not self.db or not self.db.session or not self.db.session.active then
-    if self:IsDebugEnabled() then
-      self:Debug("Ignoring START_LOOT_ROLL (not in active raid session).")
+    if debugEnabled then
+      self:Debug("Ignoring START_LOOT_ROLL (not in active raid session): inRaid=" .. tostring(IsInRaid()) .. " hasDB=" .. tostring(self.db ~= nil) .. " sessionActive=" .. tostring(self.db and self.db.session and self.db.session.active))
     end
     return
   end
   if not self:IsAuthority() then
-    if self:IsDebugEnabled() then
-      self:Debug("Ignoring START_LOOT_ROLL (not authority).")
+    if debugEnabled then
+      self:Debug("Ignoring START_LOOT_ROLL (not authority): leader=" .. tostring(UnitIsGroupLeader("player")) .. " assistant=" .. tostring(UnitIsGroupAssistant("player")))
     end
     return
   end
@@ -776,6 +806,9 @@ function GLD:OnStartLootRoll(rollID, rollTime, lootHandle)
 
   local texture, name, count, quality, bop, canNeed, canGreed, canDE, canTransmog, reason = GetLootRollItemInfo(rollID)
   local link = GetLootRollItemLink(rollID)
+  if debugEnabled and not link and not name then
+    self:Debug("START_LOOT_ROLL missing item info: rollID=" .. tostring(rollID) .. " reason=" .. tostring(reason) .. " bop=" .. tostring(bop))
+  end
   local itemID = nil
   if link and GetItemInfoInstant then
     itemID = select(1, GetItemInfoInstant(link))

@@ -538,6 +538,21 @@ local function EnsureLootWindow(self)
   end)
   adminOverrideButton:Hide()
 
+  local forcePendingButton = CreateFrame("Button", nil, activePanel, "UIPanelButtonTemplate")
+  forcePendingButton:SetSize(120, 18)
+  forcePendingButton:SetText("Force Pending")
+  forcePendingButton:SetPoint("TOPRIGHT", adminOverrideButton, "TOPLEFT", -6, 0)
+  forcePendingButton:SetScript("OnClick", function()
+    if not GLD:IsAuthority() then
+      GLD:Print("Only the authority can force pending windows.")
+      return
+    end
+    if GLD.ForcePendingVotesWindow then
+      GLD:ForcePendingVotesWindow()
+    end
+  end)
+  forcePendingButton:Hide()
+
   local activeIcon = activePanel:CreateTexture(nil, "ARTWORK")
   activeIcon:SetSize(36, 36)
   activeIcon:SetPoint("TOPLEFT", activeTitle, "BOTTOMLEFT", 0, -6)
@@ -633,6 +648,7 @@ local function EnsureLootWindow(self)
   window.activeStatusLabel = statusLabel
   window.activeMessageLabel = votedLabel
   window.adminOverrideButton = adminOverrideButton
+  window.forcePendingButton = forcePendingButton
   window.voteButtons = voteButtons
   window.pendingScroll = pendingScroll
   window.pendingScrollChild = pendingScrollChild
@@ -667,9 +683,14 @@ local function UpdateActivePanel(self, state, window)
   local index = state.activeIndex
   local entry = state.currentVoteItems[index]
   local showOverride = entry and not state.demoMode and GLD.IsAuthority and GLD:IsAuthority()
+  local showForce = not state.demoMode and GLD.IsAuthority and GLD:IsAuthority() and IsInRaid()
   if window.adminOverrideButton then
     window.adminOverrideButton:SetShown(showOverride)
     window.adminOverrideButton:SetEnabled(showOverride)
+  end
+  if window.forcePendingButton then
+    window.forcePendingButton:SetShown(showForce)
+    window.forcePendingButton:SetEnabled(showForce)
   end
   if not entry then
     window.activeItemLabel:SetText("No active loot roll.")
@@ -858,7 +879,14 @@ function UI:RefreshLootWindow(options)
   local displaySessions = state.demoMode and (state.demoItems or {}) or sessions
   BuildVoteEntries(self, displaySessions)
   UpdateActiveSelection(self, state, options)
-  local sessionActive = GLD.db and GLD.db.session and GLD.db.session.active
+  local sessionActive = nil
+  if GLD.IsAuthority and GLD:IsAuthority() then
+    sessionActive = GLD.db and GLD.db.session and GLD.db.session.active
+  elseif GLD.shadow and GLD.shadow.sessionActive ~= nil then
+    sessionActive = GLD.shadow.sessionActive
+  else
+    sessionActive = GLD.db and GLD.db.session and GLD.db.session.active
+  end
   local inRaid = IsInRaid()
   local shouldShow = options.forceShow
     or state.demoMode

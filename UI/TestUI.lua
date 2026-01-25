@@ -328,6 +328,19 @@ end
 
 local function BuildAdminRosterList()
   local list = {}
+  if GLD and GLD.GetRosterSource then
+    local source = GLD:GetRosterSource()
+    if type(source) == "table" and #source > 0 then
+      for _, entry in ipairs(source) do
+        local player = entry.member or entry
+        local key = entry.key or (player and (player.key or player.playerKey)) or nil
+        if player then
+          list[#list + 1] = { key = key, player = player }
+        end
+      end
+      return list
+    end
+  end
   for key, player in pairs(GetLivePlayersTable()) do
     if player then
       list[#list + 1] = { key = key, player = player }

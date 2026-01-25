@@ -10,6 +10,9 @@ NS.MSG = {
   ROLL_VOTE = "ROLL_VOTE",
   ROLL_RESULT = "ROLL_RESULT",
   ROLL_MISMATCH = "ROLL_MISMATCH",
+  FORCE_PENDING = "FORCE_PENDING",
+  REV_CHECK = "REV_CHECK",
+  ADMIN_REQUEST = "ADMIN_REQUEST",
 }
 
 local function SafeGetLib(name)
@@ -32,6 +35,13 @@ function GLD:Print(msg)
   DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99GuildLoot|r " .. tostring(msg))
 end
 
+function GLD:TraceStep(msg)
+  if msg == nil then
+    return
+  end
+  self:Print("Step: " .. tostring(msg))
+end
+
 function GLD:IsDebugEnabled()
   return self.db and self.db.config and self.db.config.debugLogs == true
 end
@@ -48,26 +58,8 @@ function GLD:Debug(msg)
 end
 
 function GLD:IsAdmin()
-  if self.IsGuest and self:IsGuest("player") then
-    return false
-  end
-  if UnitIsGroupLeader("player") or UnitIsGroupAssistant("player") then
-    return true
-  end
-  if IsGuildLeader and IsGuildLeader() then
-    return true
-  end
-  if IsInGuild() then
-    local _, _, rankIndex = GetGuildInfo("player")
-    if rankIndex ~= nil and rankIndex == 0 then
-      return true
-    end
-    if rankIndex ~= nil and GuildControlGetNumRanks then
-      local rankName = GuildControlGetRankName(rankIndex + 1)
-      if rankName and rankName:lower() == "officer" then
-        return true
-      end
-    end
+  if self.CanLocalSeeAdminUI then
+    return self:CanLocalSeeAdminUI()
   end
   return false
 end
@@ -102,6 +94,9 @@ function GLD:OnEnable()
   if self.TryCreateGuildUIButton then
     self:TryCreateGuildUIButton()
   end
+  if self.InitRaidStateTicker then
+    self:InitRaidStateTicker()
+  end
   self:Print("Commands: /gld (main UI), /disadmin (admin), /gldtest (seed test), /gldadmintest (admin test panel), /glddebug (debug window)")
 end
 
@@ -114,7 +109,7 @@ function GLD:RegisterSlashCommands()
 
   SLASH_DISADMIN1 = "/disadmin"
   SlashCmdList["DISADMIN"] = function()
-    if not self.CanMutateState or not self:CanMutateState() then
+    if not self.CanAccessAdminUI or not self:CanAccessAdminUI() then
       self:Print("you do not have Guild Permission to access this panel")
       return
     end
@@ -132,7 +127,7 @@ function GLD:RegisterSlashCommands()
 
   SLASH_GLDADMINTEST1 = "/gldadmintest"
   SlashCmdList["GLDADMINTEST"] = function()
-    if not self.CanMutateState or not self:CanMutateState() then
+    if not self.CanAccessAdminUI or not self:CanAccessAdminUI() then
       self:Print("you do not have Guild Permission to access this panel")
       return
     end

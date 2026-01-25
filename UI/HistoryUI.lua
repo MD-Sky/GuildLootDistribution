@@ -281,33 +281,24 @@ function UI:CreateHistoryFrame()
 
   frame:AddChild(filters)
 
-  local columns = AceGUI:Create("SimpleGroup")
-  columns:SetFullWidth(true)
-  columns:SetFullHeight(true)
-  columns:SetLayout("Flow")
-  frame:AddChild(columns)
-
-  local left = AceGUI:Create("InlineGroup")
-  left:SetTitle("Sessions")
-  left:SetWidth(350)
-  left:SetFullHeight(true)
-  left:SetLayout("Fill")
-
-  local leftScroll = AceGUI:Create("ScrollFrame")
-  leftScroll:SetLayout("Flow")
-  left:AddChild(leftScroll)
-  columns:AddChild(left)
-
-  local right = AceGUI:Create("InlineGroup")
-  right:SetTitle("Session Details")
-  right:SetFullWidth(true)
-  right:SetFullHeight(true)
-  right:SetLayout("Fill")
-
-  local rightScroll = AceGUI:Create("ScrollFrame")
-  rightScroll:SetLayout("Flow")
-  right:AddChild(rightScroll)
-  columns:AddChild(right)
+  local tree = AceGUI:Create("TreeGroup")
+  tree:SetFullWidth(true)
+  tree:SetFullHeight(true)
+  tree:SetLayout("Fill")
+  if tree.EnableTreeResizing then
+    tree:EnableTreeResizing(false)
+  end
+  if tree.SetTreeWidth then
+    tree:SetTreeWidth(320, false)
+  end
+  if tree.EnableButtonTooltips then
+    tree:EnableButtonTooltips(false)
+  end
+  tree:SetCallback("OnGroupSelected", function(_, _, value)
+    self.historySelectedId = value
+    self:RefreshHistoryDetails()
+  end)
+  frame:AddChild(tree)
 
   raidFilter:SetCallback("OnValueChanged", function(_, _, value)
     self.historyRaidFilter = value
@@ -325,8 +316,9 @@ function UI:CreateHistoryFrame()
   end)
 
   self.historyFrame = frame
-  self.historyListScroll = leftScroll
-  self.historyDetailScroll = rightScroll
+  self.historyTree = tree
+  self.historyDetailScroll = nil
+  self.historySelectedId = nil
   self.historyRaidFilter = "ALL"
   self.historyDiffFilter = "ALL"
   self.historyRangeFilter = "ALL"
@@ -344,12 +336,11 @@ function UI:RefreshHistoryIfOpen()
 end
 
 function UI:RefreshHistoryList()
-  if not self.historyListScroll then
+  if not self.historyTree then
     return
   end
 
   local sessions = GLD.db.raidSessions or {}
-  self.historyListScroll:ReleaseChildren()
 
   if self.historyRaidFilterWidget then
     self.historyRaidFilterWidget:SetList(GetUniqueValues(sessions, "raidName"))
@@ -367,71 +358,83 @@ function UI:RefreshHistoryList()
     cutoff = GetServerTime() - (90 * 24 * 60 * 60)
   end
 
-  local count = 0
+  local treeData = {}
   local firstMatch = nil
+  local selectedStillValid = false
+  local maxLabelWidth = 0
   for _, entry in ipairs(sessions) do
     local raidOk = self.historyRaidFilter == "ALL" or entry.raidName == self.historyRaidFilter
     local diffOk = self.historyDiffFilter == "ALL" or entry.difficultyName == self.historyDiffFilter
     local dateOk = not cutoff or (entry.startedAt or 0) >= cutoff
     if raidOk and diffOk and dateOk then
-      count = count + 1
       if not firstMatch then
         firstMatch = entry.id
       end
-      local row = AceGUI:Create("SimpleGroup")
-      row:SetFullWidth(true)
-      row:SetLayout("Flow")
-
-      local dateLabel = AceGUI:Create("Label")
-      dateLabel:SetWidth(110)
-      dateLabel:SetText(FormatDateTime(entry.startedAt))
-      row:AddChild(dateLabel)
-
-      local raidLabel = AceGUI:Create("Label")
-      raidLabel:SetWidth(120)
-      raidLabel:SetText(entry.raidName or "Unknown")
-      row:AddChild(raidLabel)
-
-      local diffLabel = AceGUI:Create("Label")
-      diffLabel:SetWidth(80)
-      diffLabel:SetText(entry.difficultyName or "-")
-      row:AddChild(diffLabel)
-
-      local bossCount = AceGUI:Create("Label")
-      bossCount:SetWidth(40)
-      bossCount:SetText(tostring(#(entry.bosses or {})))
-      row:AddChild(bossCount)
-
-      local viewBtn = AceGUI:Create("Button")
-      viewBtn:SetText("View")
-      viewBtn:SetWidth(60)
-      viewBtn:SetCallback("OnClick", function()
-        self.historySelectedId = entry.id
-        self:RefreshHistoryDetails()
-      end)
-      row:AddChild(viewBtn)
-
-      self.historyListScroll:AddChild(row)
+      if self.historySelectedId == entry.id then
+        selectedStillValid = true
+      end
+      local label = string.format("%s - %s - %s - %s",
+        FormatDateTime(entry.startedAt),
+        entry.raidName or "Unknown",
+        entry.difficultyName or "-",
+        FormatDuration(entry.startedAt, entry.endedAt)
+      )
+      treeData[#treeData + 1] = { value = entry.id, text = label }
+      if self.historyTree and self.historyTree.frame then
+        if not self._historyMeasure then
+          local fs = self.historyTree.frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+          fs:SetText("")
+          self._historyMeasure = fs
+        end
+        if self._historyMeasure then
+          self._historyMeasure:SetText(label)
+          local w = self._historyMeasure:GetStringWidth() or 0
+          if w > maxLabelWidth then
+            maxLabelWidth = w
+          end
+        end
+      end
     end
   end
 
-  if count == 0 then
-    local empty = AceGUI:Create("Label")
-    empty:SetFullWidth(true)
-    empty:SetText("No raid sessions match the current filters.")
-    self.historyListScroll:AddChild(empty)
-  elseif not self.historySelectedId and firstMatch then
-    self.historySelectedId = firstMatch
+  self.historyTree:SetTree(treeData)
+  if self.historyTree.SetTreeWidth and maxLabelWidth > 0 then
+    local padding = 60
+    local width = math.floor(maxLabelWidth + padding)
+    width = math.max(220, math.min(520, width))
+    self.historyTree:SetTreeWidth(width, false)
+  end
+
+  if not firstMatch then
+    self.historySelectedId = nil
     self:RefreshHistoryDetails()
+    return
+  end
+
+  if not selectedStillValid then
+    self.historySelectedId = nil
+  end
+  if self.historySelectedId then
+    self.historyTree:Select(self.historySelectedId)
+  elseif firstMatch then
+    self.historySelectedId = firstMatch
+    self.historyTree:Select(firstMatch)
   end
 end
 
 function UI:RefreshHistoryDetails()
-  if not self.historyDetailScroll then
+  if not self.historyTree then
     return
   end
 
-  self.historyDetailScroll:ReleaseChildren()
+  self.historyTree:ReleaseChildren()
+
+  local detailScroll = AceGUI:Create("ScrollFrame")
+  detailScroll:SetLayout("Flow")
+  detailScroll:SetFullWidth(true)
+  detailScroll:SetFullHeight(true)
+  self.historyTree:AddChild(detailScroll)
+  self.historyDetailScroll = detailScroll
 
   local selected = nil
   for _, entry in ipairs(GLD.db.raidSessions or {}) do
@@ -445,14 +448,14 @@ function UI:RefreshHistoryDetails()
     local empty = AceGUI:Create("Label")
     empty:SetFullWidth(true)
     empty:SetText("Select a session on the left to view details.")
-    self.historyDetailScroll:AddChild(empty)
+    detailScroll:AddChild(empty)
     return
   end
 
   local header = AceGUI:Create("Heading")
   header:SetFullWidth(true)
   header:SetText((selected.raidName or "Unknown") .. " - " .. (selected.difficultyName or "-") )
-  self.historyDetailScroll:AddChild(header)
+  detailScroll:AddChild(header)
 
   local meta = AceGUI:Create("Label")
   meta:SetFullWidth(true)
@@ -461,7 +464,7 @@ function UI:RefreshHistoryDetails()
     FormatDateTime(selected.endedAt),
     FormatDuration(selected.startedAt, selected.endedAt)
   ))
-  self.historyDetailScroll:AddChild(meta)
+  detailScroll:AddChild(meta)
 
   local copyBtn = AceGUI:Create("Button")
   copyBtn:SetText("Copy Summary")
@@ -469,28 +472,28 @@ function UI:RefreshHistoryDetails()
   copyBtn:SetCallback("OnClick", function()
     self:ShowHistorySummaryPopup(selected)
   end)
-  self.historyDetailScroll:AddChild(copyBtn)
+  detailScroll:AddChild(copyBtn)
 
   local bosses = selected.bosses or {}
   if #bosses == 0 then
     local none = AceGUI:Create("Label")
     none:SetFullWidth(true)
     none:SetText("No boss kills logged for this session.")
-    self.historyDetailScroll:AddChild(none)
+    detailScroll:AddChild(none)
   end
 
   for _, boss in ipairs(bosses) do
     local bossHeader = AceGUI:Create("Heading")
     bossHeader:SetFullWidth(true)
     bossHeader:SetText((boss.encounterName or "Boss") .. " - " .. FormatDateTime(boss.killedAt))
-    self.historyDetailScroll:AddChild(bossHeader)
+    detailScroll:AddChild(bossHeader)
 
     local loot = boss.loot or {}
     if #loot == 0 then
       local none = AceGUI:Create("Label")
       none:SetFullWidth(true)
       none:SetText("No loot recorded for this boss.")
-      self.historyDetailScroll:AddChild(none)
+      detailScroll:AddChild(none)
     else
       local bossKey = boss.encounterID or boss.encounterId or boss.encounterName or boss.killedAt or "boss"
       for idx, item in ipairs(loot) do
@@ -523,7 +526,7 @@ function UI:RefreshHistoryDetails()
     local looseHeader = AceGUI:Create("Heading")
     looseHeader:SetFullWidth(true)
     looseHeader:SetText("Session Loot (unassigned)")
-    self.historyDetailScroll:AddChild(looseHeader)
+    detailScroll:AddChild(looseHeader)
 
     for idx, item in ipairs(looseLoot) do
       local entryKey = BuildHistoryLootKey(selected.id, item, idx, "loose")

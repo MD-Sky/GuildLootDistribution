@@ -1,6 +1,7 @@
 local _, NS = ...
 
 local GLD = NS.GLD
+local RAID_STATE_REFRESH_SECONDS = 20
 
 function GLD:InitAttendance()
   if not self.db.session then
@@ -46,6 +47,9 @@ function GLD:StartRaidSession()
   table.insert(self.db.raidSessions, 1, entry)
   self.db.session.raidSessionId = id
   self.db.session.currentBoss = nil
+  if self.MarkDBChanged then
+    self:MarkDBChanged("raid_session_start")
+  end
   if self.UI and self.UI.RefreshHistoryIfOpen then
     self.UI:RefreshHistoryIfOpen()
   end
@@ -54,6 +58,14 @@ end
 
 function GLD:StartSession()
   if self.db.session.active then
+    return
+  end
+  if not IsInRaid() then
+    self:Print("You must be in a raid to start a session.")
+    return
+  end
+  if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
+    self:Print("you do not have Guild Permission to access this panel")
     return
   end
   if self.SetSessionAuthority then
@@ -71,6 +83,9 @@ function GLD:StartSession()
   end
   self:AutoMarkCurrentGroup()
   self:EnsureQueuePositions()
+  if self.MarkDBChanged then
+    self:MarkDBChanged("session_start")
+  end
   self:BroadcastSnapshot()
   self:Print("Session started")
 end
@@ -79,7 +94,14 @@ function GLD:EndSession()
   if not self.db.session.active then
     return
   end
+  if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
+    self:Print("you do not have Guild Permission to access this panel")
+    return
+  end
   self.db.session.active = false
+  if self.shadow then
+    self.shadow.sessionActive = false
+  end
   if self.ClearSessionAuthority then
     self:ClearSessionAuthority()
   end
@@ -89,19 +111,34 @@ function GLD:EndSession()
   end
   self.db.session.raidSessionId = nil
   self.db.session.currentBoss = nil
+  if self.MarkDBChanged then
+    self:MarkDBChanged("session_end")
+  end
   if self.UI and self.UI.RefreshHistoryIfOpen then
     self.UI:RefreshHistoryIfOpen()
   end
-  self:BroadcastSnapshot()
+  self:BroadcastSnapshot(true)
   self:Print("Session ended")
 end
 
 function GLD:OnEncounterEnd(_, encounterID, encounterName, difficultyID, groupSize, success)
-  if not self.db.session.active or success ~= 1 then
+  local sessionActive = nil
+  if self.shadow and self.shadow.sessionActive ~= nil then
+    sessionActive = self.shadow.sessionActive == true
+  else
+    sessionActive = self.db.session.active == true
+  end
+  if not sessionActive or success ~= 1 then
     return
   end
   if self.IsDebugEnabled and self:IsDebugEnabled() then
     self:Debug("Boss kill detected: " .. tostring(encounterName or encounterID or "Unknown"))
+  end
+  if encounterName or encounterID then
+    local bossLabel = encounterName or ("Encounter " .. tostring(encounterID))
+    self:TraceStep("Boss defeated: " .. tostring(bossLabel))
+  else
+    self:TraceStep("Boss defeated.")
   end
   local raidSession = self:GetActiveRaidSession()
   if not raidSession then
@@ -131,29 +168,42 @@ function GLD:AutoMarkCurrentGroup()
   if not IsInRaid() then
     return
   end
+  local changed = false
   local presentKeys = {}
   local count = GetNumGroupMembers()
   for i = 1, count do
     local unit = "raid" .. i
     if UnitExists(unit) and UnitIsConnected(unit) then
-      local playerKey = self:UpsertPlayerFromUnit(unit)
+      local playerKey, isNew = self:UpsertPlayerFromUnit(unit)
       if playerKey then
         presentKeys[playerKey] = true
+        if isNew then
+          changed = true
+        end
         if self.db.session.active and not self.db.session.attended[playerKey] then
           local player = self.db.players[playerKey]
           player.attendanceCount = (player.attendanceCount or 0) + 1
           self.db.session.attended[playerKey] = true
+          if self.MarkDBChanged then
+            self:MarkDBChanged("attendance_count")
+          end
         end
-        self:SetAttendance(playerKey, "PRESENT")
+        if self.SetAttendance and self:SetAttendance(playerKey, "PRESENT") then
+          changed = true
+        end
       end
     end
   end
 
   for key, player in pairs(self.db.players) do
-    if player.attendance == "PRESENT" and not presentKeys[key] then
-      self:SetAttendance(key, "ABSENT")
+    local state = (player.attendance or ""):upper()
+    if state == "PRESENT" and not presentKeys[key] then
+      if self.SetAttendance and self:SetAttendance(key, "ABSENT") then
+        changed = true
+      end
     end
   end
+  return changed
 end
 
 function GLD:OnGroupRosterUpdate()
@@ -185,5 +235,56 @@ function GLD:OnGroupRosterUpdate()
   self:BroadcastSnapshot()
   if self.UI then
     self.UI:RefreshMain()
+  end
+end
+
+function GLD:IsSessionActiveLocal()
+  if self:IsAuthority() then
+    return self.db and self.db.session and self.db.session.active == true
+  end
+  if self.shadow and self.shadow.sessionActive ~= nil then
+    return self.shadow.sessionActive == true
+  end
+  return false
+end
+
+function GLD:InitRaidStateTicker()
+  if self.raidStateTicker then
+    return
+  end
+  if not C_Timer or not C_Timer.NewTicker then
+    return
+  end
+  self.raidStateTicker = C_Timer.NewTicker(RAID_STATE_REFRESH_SECONDS, function()
+    if self.OnRaidStateTick then
+      self:OnRaidStateTick()
+    end
+  end)
+end
+
+function GLD:OnRaidStateTick()
+  if not IsInRaid() then
+    return
+  end
+
+  local sessionActive = self:IsSessionActiveLocal()
+  if sessionActive and self:IsAuthority() and self.AutoMarkCurrentGroup then
+    local changed = self:AutoMarkCurrentGroup()
+    if changed and self.UI then
+      self.UI:RefreshMain()
+    end
+  end
+
+  if not self:IsAuthority() then
+    local shouldPing = sessionActive
+    if not shouldPing then
+      local roster = self.shadow and self.shadow.roster or nil
+      if not roster or next(roster) == nil then
+        shouldPing = true
+      end
+    end
+    if shouldPing and self.SendRevisionCheck then
+      self:SendRevisionCheck()
+    end
   end
 end

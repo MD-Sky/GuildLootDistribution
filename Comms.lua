@@ -59,6 +59,7 @@ function GLD:ComputeRosterHashFromSnapshot(roster)
       tostring(entry.savedPos or ""),
       tostring(entry.numAccepted or ""),
       tostring(entry.attendanceCount or ""),
+      tostring(entry.isGuest == true),
     }, "|")
   end
   return HashString(table.concat(parts, "#"))
@@ -77,6 +78,7 @@ function GLD:ComputeRosterHashFromDB()
       savedPos = player.savedPos,
       numAccepted = player.numAccepted,
       attendanceCount = player.attendanceCount,
+      isGuest = player.isGuest == true or player.source == "guest",
     }
   end
   return self:ComputeRosterHashFromSnapshot(roster)
@@ -110,6 +112,15 @@ function GLD:InitComms()
   end
   self.commHandlers[NS.MSG.ROLL_MISMATCH] = function(sender, payload)
     self:HandleRollMismatch(sender, payload)
+  end
+  self.commHandlers[NS.MSG.FORCE_PENDING] = function(sender, payload)
+    self:HandleForcePending(sender, payload)
+  end
+  self.commHandlers[NS.MSG.REV_CHECK] = function(sender, payload)
+    self:HandleRevisionCheck(sender, payload)
+  end
+  self.commHandlers[NS.MSG.ADMIN_REQUEST] = function(sender, payload)
+    self:HandleAdminRequest(sender, payload)
   end
 end
 
@@ -153,7 +164,14 @@ function GLD:HandleStateSnapshot(sender, payload)
     self:Debug("Sync mismatch: your config differs from authority.")
   end
   self.shadow.lastSyncAt = GetServerTime()
-  if payload.my then
+  self.shadow.meta = self.shadow.meta or {}
+  if payload.revision ~= nil then
+    self.shadow.meta.revision = payload.revision
+  end
+  if payload.lastChanged ~= nil then
+    self.shadow.meta.lastChanged = payload.lastChanged
+  end
+  if payload.my and self:IsAuthority() then
     self.shadow.my = payload.my
   end
   if payload.roster then
@@ -161,13 +179,21 @@ function GLD:HandleStateSnapshot(sender, payload)
     if self.UpdateShadowMyFromRoster then
       self:UpdateShadowMyFromRoster(self.shadow.roster)
     end
+  elseif payload.my then
+    self.shadow.my = payload.my
   end
   if payload.sessionActive ~= nil then
     self.shadow.sessionActive = payload.sessionActive == true
   end
+  if payload.sessionActive == false and (payload.authorityGUID == nil or payload.authorityGUID == "") then
+    if self.ClearSessionAuthority then
+      self:ClearSessionAuthority()
+    end
+  end
   if self.IsDebugEnabled and self:IsDebugEnabled() then
     local rosterCount = (self.shadow and self.shadow.roster and #self.shadow.roster) or 0
     local my = self.shadow and self.shadow.my or nil
+    local rev = self.shadow and self.shadow.meta and self.shadow.meta.revision or "nil"
     self:Debug(
       "Snapshot received: rosterSource=shadow.roster rosterCount="
         .. tostring(rosterCount)
@@ -175,6 +201,8 @@ function GLD:HandleStateSnapshot(sender, payload)
         .. tostring(my and my.queuePos or "nil")
         .. " myHeld="
         .. tostring(my and my.savedPos or "nil")
+        .. " revision="
+        .. tostring(rev)
     )
   end
   if self.UI then
@@ -193,7 +221,7 @@ function GLD:HandleDelta(sender, payload)
       return
     end
   end
-  if payload.my then
+  if payload.my and self:IsAuthority() then
     self.shadow.my = payload.my
   end
   if payload.roster then
@@ -201,6 +229,16 @@ function GLD:HandleDelta(sender, payload)
     if self.UpdateShadowMyFromRoster then
       self:UpdateShadowMyFromRoster(self.shadow.roster)
     end
+  elseif payload.my then
+    self.shadow.my = payload.my
+  end
+  if payload.revision ~= nil then
+    self.shadow.meta = self.shadow.meta or {}
+    self.shadow.meta.revision = payload.revision
+  end
+  if payload.lastChanged ~= nil then
+    self.shadow.meta = self.shadow.meta or {}
+    self.shadow.meta.lastChanged = payload.lastChanged
   end
   if self.UI then
     self.UI:RefreshMain()
@@ -225,6 +263,8 @@ function GLD:BuildSnapshot()
         rosterHash = nil,
         configHash = self:ComputeConfigHash(),
         sessionActive = sessionActive,
+        revision = self.db and self.db.meta and self.db.meta.revision or 0,
+        lastChanged = self.db and self.db.meta and self.db.meta.lastChanged or 0,
         authorityGUID = self:GetAuthorityGUID(),
         authorityName = self:GetAuthorityName(),
       }
@@ -250,12 +290,15 @@ function GLD:BuildSnapshot()
       attendance = player.attendance,
       attendanceCount = player.attendanceCount,
       role = snapshotRole,
+      isGuest = player.isGuest == true or player.source == "guest",
     })
   end
 
     local rosterHash = self:ComputeRosterHashFromSnapshot(roster)
     local configHash = self:ComputeConfigHash()
     local sessionActive = self.db and self.db.session and self.db.session.active == true
+    local revision = self.db and self.db.meta and self.db.meta.revision or 0
+    local lastChanged = self.db and self.db.meta and self.db.meta.lastChanged or 0
 
   local myKey = NS:GetPlayerKeyFromUnit("player")
   if myKey then
@@ -275,13 +318,15 @@ function GLD:BuildSnapshot()
       rosterHash = rosterHash,
       configHash = configHash,
       sessionActive = sessionActive,
+      revision = revision,
+      lastChanged = lastChanged,
       authorityGUID = self:GetAuthorityGUID(),
       authorityName = self:GetAuthorityName(),
     }
   end
 
-function GLD:BroadcastSnapshot()
-  if not self:IsAuthority() then
+function GLD:BroadcastSnapshot(force)
+  if not force and not self:IsAuthority() then
     return
   end
   if not IsInRaid() then
@@ -291,6 +336,124 @@ function GLD:BroadcastSnapshot()
   self:SendCommMessageSafe(NS.MSG.STATE_SNAPSHOT, snapshot, "RAID")
 end
 
+function GLD:SendRevisionCheck()
+  if self:IsAuthority() then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  local revision = self.shadow and self.shadow.meta and self.shadow.meta.revision or 0
+  self:SendCommMessageSafe(NS.MSG.REV_CHECK, {
+    revision = revision,
+    requestedAt = GetServerTime(),
+  }, "RAID")
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug("Revision ping sent: revision=" .. tostring(revision))
+  end
+end
+
+function GLD:RequestAdminAction(action)
+  if not action or action == "" then
+    return false
+  end
+  if self:IsAuthority() then
+    if action == "START_SESSION" and self.StartSession then
+      self:StartSession()
+      return true
+    end
+    if action == "END_SESSION" and self.EndSession then
+      self:EndSession()
+      return true
+    end
+    return false
+  end
+  if not IsInRaid() then
+    self:Print("You must be in a raid to request this action.")
+    return false
+  end
+  if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
+    self:Print("you do not have Guild Permission to access this panel")
+    return false
+  end
+  self:SendCommMessageSafe(NS.MSG.ADMIN_REQUEST, {
+    action = action,
+    requestedAt = GetServerTime(),
+  }, "RAID")
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug("Admin request sent: action=" .. tostring(action))
+  end
+  return true
+end
+
+function GLD:HandleRevisionCheck(sender, payload)
+  if not self:IsAuthority() then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  if not self.IsSenderInRaid or not self:IsSenderInRaid(sender) then
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug("Revision ping ignored (sender not in raid): " .. tostring(sender))
+    end
+    return
+  end
+  local clientRev = payload and tonumber(payload.revision) or nil
+  local serverRev = self.db and self.db.meta and self.db.meta.revision or 0
+  local shouldSend = (clientRev == nil) or (clientRev < serverRev)
+  if shouldSend then
+    self:BroadcastSnapshot()
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    local outcome = shouldSend and "snapshot_sent" or "up_to_date"
+    self:Debug(
+      "Revision ping handled: sender="
+        .. tostring(sender)
+        .. " clientRev="
+        .. tostring(clientRev)
+        .. " serverRev="
+        .. tostring(serverRev)
+        .. " outcome="
+        .. outcome
+    )
+  end
+end
+
+function GLD:HandleAdminRequest(sender, payload)
+  if not self:IsAuthority() then
+    return
+  end
+  if not payload or not payload.action then
+    return
+  end
+  local ok, reason = false, "missing validation"
+  if self.ValidateAdminRequestSender then
+    ok, reason = self:ValidateAdminRequestSender(sender, payload.action)
+  end
+  if not ok then
+    local label = reason or "rejected"
+    self:Print("Admin request rejected from " .. tostring(sender) .. ": " .. tostring(label))
+    return
+  end
+  local action = payload.action
+  if action == "START_SESSION" then
+    if self.StartSession then
+      self:StartSession()
+    end
+    return
+  end
+  if action == "END_SESSION" then
+    if self.EndSession then
+      self:EndSession()
+    end
+    return
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug("Admin request ignored (unknown action): " .. tostring(action))
+  end
+end
+
 function GLD:HandleRollSession(sender, payload)
   if not payload or not payload.rollID then
     return
@@ -298,7 +461,16 @@ function GLD:HandleRollSession(sender, payload)
 
   local isTest = payload.test == true
   if not isTest then
-    if not self.db or not self.db.session or not self.db.session.active or not IsInRaid() then
+    local sessionActive = nil
+    if self.shadow and self.shadow.sessionActive ~= nil then
+      sessionActive = self.shadow.sessionActive == true
+    elseif self:IsAuthority() then
+      sessionActive = self.db and self.db.session and self.db.session.active == true
+    end
+    if sessionActive == nil then
+      sessionActive = true
+    end
+    if not sessionActive or not IsInRaid() then
       if self.IsDebugEnabled and self:IsDebugEnabled() then
         self:Debug("Ignoring roll session (not in active raid session).")
       end
@@ -392,6 +564,17 @@ function GLD:HandleRollSession(sender, payload)
     end
   end
 
+  session.trace = session.trace or {}
+  if not session.trace.rollReceived then
+    session.trace.rollReceived = true
+    local itemLabel = payload.itemLink or payload.itemName or session.itemLink or session.itemName or "Item"
+    if payload.snapshot then
+      self:TraceStep("Roll snapshot received: " .. tostring(itemLabel))
+    else
+      self:TraceStep("Loot roll received: " .. tostring(itemLabel) .. ". Vote window should appear.")
+    end
+  end
+
   if isTest and self.UI then
     self.UI:ShowRollPopup(session)
   end
@@ -475,6 +658,10 @@ function GLD:HandleRollVote(sender, payload)
         .. tostring(key)
         .. " vote="
         .. tostring(payload.vote)
+        .. " sender="
+        .. tostring(sender)
+        .. " broadcast="
+        .. tostring(payload.broadcast == true)
     )
   end
 
@@ -523,7 +710,14 @@ function GLD:HandleRollResult(sender, payload)
     session.result = payload
   end
   self:RecordRollHistory(payload)
-  self:Print("GLD Result: " .. tostring(payload.itemName or payload.itemLink or "Item") .. " -> " .. tostring(payload.winnerName or "None"))
+  local itemLabel = tostring(payload.itemName or payload.itemLink or "Item")
+  local winnerLabel = tostring(payload.winnerName or "None")
+  local detail = ""
+  if payload.resolvedBy == "OVERRIDE" then
+    local by = payload.overrideBy or payload.authorityName or sender or "Authority"
+    detail = " (override by " .. tostring(by) .. ")"
+  end
+  self:TraceStep("Winner decided: " .. itemLabel .. " -> " .. winnerLabel .. detail)
   if self.IsDebugEnabled and self:IsDebugEnabled() then
     self:Debug("Result broadcast received: rollID=" .. tostring(payload.rollID) .. " rollKey=" .. tostring(rollKey))
   end
@@ -560,4 +754,21 @@ function GLD:HandleRollMismatch(sender, payload)
     end
   end
   self:Print("GLD mismatch: " .. tostring(payload.name) .. " declared " .. tostring(payload.expected) .. " but rolled " .. tostring(payload.actual))
+end
+
+function GLD:HandleForcePending(sender, payload)
+  if self.IsAuthorizedSender then
+    local ok = self:IsAuthorizedSender(sender, payload and payload.authorityGUID, payload and payload.authorityName)
+    if not ok then
+      self:Debug("Blocked unauthorized pending request from " .. tostring(sender))
+      return
+    end
+  end
+  if self.UI and self.UI.ShowPendingFrame then
+    self.UI:ShowPendingFrame()
+  elseif self.UI and self.UI.RefreshLootWindow then
+    self.UI:RefreshLootWindow({ forceShow = true })
+  end
+  local fromName = payload and (payload.authorityName or sender) or sender
+  self:TraceStep("Pending votes window requested by " .. tostring(fromName))
 end
