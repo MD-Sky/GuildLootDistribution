@@ -1,5 +1,5 @@
 ## Interface: 120000, 11508,120001
-## Title: GuildLootDistrabution
+## Title: GuildLootDistribution
 ## Notes: Guild loot queue and distribution manager
 ## Author: GuildLoot
 ## Version: 0.2.2

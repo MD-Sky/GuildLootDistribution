@@ -1,4 +1,4 @@
-package-as: GuildLootDistrabution
+package-as: GuildLootDistribution
 
 ignore:
   - .git/**

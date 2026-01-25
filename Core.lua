@@ -24,7 +24,7 @@ end
 
 local AceAddon = SafeGetLib("AceAddon-3.0")
 if not AceAddon then
-  DEFAULT_CHAT_FRAME:AddMessage("GuildLootDistrabution: Ace3 libraries not found. Add them to Libs/.")
+  DEFAULT_CHAT_FRAME:AddMessage("GuildLootDistribution: Ace3 libraries not found. Add them to Libs/.")
   return
 end
 
