@@ -22,6 +22,66 @@ local function FormatDuration(startedAt, endedAt)
   return string.format("%dh %dm", hours, mins)
 end
 
+local VOTE_TYPES = { "NEED", "GREED", "TRANSMOG", "PASS" }
+local VOTE_LABELS = {
+  NEED = "Need",
+  GREED = "Greed",
+  TRANSMOG = "Transmog",
+  PASS = "Pass",
+}
+
+local function BuildVoteCounts(entry)
+  local counts = { NEED = 0, GREED = 0, TRANSMOG = 0, PASS = 0 }
+  if entry and entry.voteCounts then
+    for key, value in pairs(entry.voteCounts) do
+      if counts[key] ~= nil then
+        counts[key] = tonumber(value) or 0
+      end
+    end
+    return counts
+  end
+  if entry and entry.votes then
+    for _, vote in pairs(entry.votes) do
+      if counts[vote] ~= nil then
+        counts[vote] = counts[vote] + 1
+      end
+    end
+  end
+  return counts
+end
+
+local function BuildVoteGroups(entry)
+  local groups = { NEED = {}, GREED = {}, TRANSMOG = {}, PASS = {} }
+  if entry and entry.votes then
+    for voter, vote in pairs(entry.votes) do
+      if groups[vote] then
+        table.insert(groups[vote], voter)
+      end
+    end
+  end
+  for _, voteType in ipairs(VOTE_TYPES) do
+    table.sort(groups[voteType], function(a, b)
+      return tostring(a) < tostring(b)
+    end)
+  end
+  return groups
+end
+
+local function BuildHistoryLootKey(sessionId, item, index, section)
+  local base = item and (item.rollID or item.itemLink or item.itemName) or "loot"
+  local tag = section and ("|" .. tostring(section)) or ""
+  return tostring(sessionId or "") .. ":" .. tostring(base) .. tag .. ":" .. tostring(index or 0)
+end
+
+local function ToggleHistoryLootEntry(self, key)
+  self.historyExpandedLoot = self.historyExpandedLoot or {}
+  self.historyExpandedLoot[key] = not self.historyExpandedLoot[key]
+end
+
+local function IsHistoryLootExpanded(self, key)
+  return self.historyExpandedLoot and self.historyExpandedLoot[key] or false
+end
+
 local function GetUniqueValues(list, field)
   local values = { ALL = "All" }
   local seen = {}
@@ -33,6 +93,131 @@ local function GetUniqueValues(list, field)
     end
   end
   return values
+end
+
+local function AddHistoryVoteDetails(self, item)
+  if not self.historyDetailScroll then
+    return
+  end
+  local hasDetails = item and (item.votes ~= nil or item.voteCounts ~= nil)
+  if not hasDetails then
+    local none = AceGUI:Create("Label")
+    none:SetFullWidth(true)
+    none:SetText("  Vote details not recorded.")
+    self.historyDetailScroll:AddChild(none)
+    return
+  end
+
+  local counts = BuildVoteCounts(item)
+  local totals = AceGUI:Create("Label")
+  totals:SetFullWidth(true)
+  totals:SetText(string.format("  Totals: Need %d | Greed %d | Transmog %d | Pass %d",
+    counts.NEED, counts.GREED, counts.TRANSMOG, counts.PASS))
+  self.historyDetailScroll:AddChild(totals)
+
+  local groups = BuildVoteGroups(item)
+  for _, voteType in ipairs(VOTE_TYPES) do
+    local names = groups[voteType] or {}
+    local listText = (#names > 0) and table.concat(names, ", ") or "none"
+    local row = AceGUI:Create("Label")
+    row:SetFullWidth(true)
+    row:SetText(string.format("  %s: %s", VOTE_LABELS[voteType] or voteType, listText))
+    self.historyDetailScroll:AddChild(row)
+  end
+
+  if item.missingAtLock and #item.missingAtLock > 0 then
+    local missing = AceGUI:Create("Label")
+    missing:SetFullWidth(true)
+    missing:SetText("  Missing at lock: " .. table.concat(item.missingAtLock, ", "))
+    self.historyDetailScroll:AddChild(missing)
+  end
+end
+
+local function AddHistoryLootEntry(self, item, entryKey)
+  if not self.historyDetailScroll then
+    return
+  end
+  local expanded = IsHistoryLootExpanded(self, entryKey)
+
+  local row = AceGUI:Create("SimpleGroup")
+  row:SetFullWidth(true)
+  row:SetLayout("Flow")
+
+  local toggleBtn = AceGUI:Create("Button")
+  toggleBtn:SetText(expanded and "-" or "+")
+  toggleBtn:SetWidth(24)
+  toggleBtn:SetCallback("OnClick", function()
+    ToggleHistoryLootEntry(self, entryKey)
+    self:RefreshHistoryDetails()
+  end)
+  row:AddChild(toggleBtn)
+
+  local icon = "Interface\\Icons\\INV_Misc_QuestionMark"
+  if item.itemLink then
+    local itemIcon = select(10, GetItemInfo(item.itemLink))
+    if itemIcon then
+      icon = itemIcon
+    else
+      GLD:RequestItemData(item.itemLink)
+    end
+  end
+
+  local iconWidget = AceGUI:Create("Icon")
+  iconWidget:SetImage(icon)
+  iconWidget:SetImageSize(20, 20)
+  iconWidget:SetWidth(24)
+  iconWidget:SetHeight(24)
+  iconWidget:SetCallback("OnEnter", function()
+    local link = item.itemLink
+    if link and link ~= "" then
+      GameTooltip:SetOwner(iconWidget.frame, "ANCHOR_CURSOR")
+      GameTooltip:SetHyperlink(link)
+      GameTooltip:Show()
+    end
+  end)
+  iconWidget:SetCallback("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+  iconWidget:SetCallback("OnClick", function()
+    ToggleHistoryLootEntry(self, entryKey)
+    self:RefreshHistoryDetails()
+  end)
+  row:AddChild(iconWidget)
+
+  local itemLabel = AceGUI:Create("InteractiveLabel")
+  itemLabel:SetWidth(220)
+  itemLabel:SetText(item.itemLink or item.itemName or "Unknown Item")
+  itemLabel:SetCallback("OnEnter", function()
+    local link = item.itemLink
+    if link and link ~= "" then
+      GameTooltip:SetOwner(itemLabel.frame, "ANCHOR_CURSOR")
+      GameTooltip:SetHyperlink(link)
+      GameTooltip:Show()
+    end
+  end)
+  itemLabel:SetCallback("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+  itemLabel:SetCallback("OnClick", function()
+    ToggleHistoryLootEntry(self, entryKey)
+    self:RefreshHistoryDetails()
+  end)
+  row:AddChild(itemLabel)
+
+  local winnerLabel = AceGUI:Create("InteractiveLabel")
+  winnerLabel:SetWidth(160)
+  winnerLabel:SetText("Winner: " .. tostring(item.winnerName or "None"))
+  winnerLabel:SetCallback("OnClick", function()
+    ToggleHistoryLootEntry(self, entryKey)
+    self:RefreshHistoryDetails()
+  end)
+  row:AddChild(winnerLabel)
+
+  self.historyDetailScroll:AddChild(row)
+
+  if expanded then
+    AddHistoryVoteDetails(self, item)
+  end
 end
 
 function UI:ToggleHistory()
@@ -294,61 +479,10 @@ function UI:RefreshHistoryDetails()
       none:SetText("No loot recorded for this boss.")
       self.historyDetailScroll:AddChild(none)
     else
-      for _, item in ipairs(loot) do
-        local row = AceGUI:Create("SimpleGroup")
-        row:SetFullWidth(true)
-        row:SetLayout("Flow")
-
-        local icon = "Interface\\Icons\\INV_Misc_QuestionMark"
-        if item.itemLink then
-          local itemIcon = select(10, GetItemInfo(item.itemLink))
-          if itemIcon then
-            icon = itemIcon
-          else
-            GLD:RequestItemData(item.itemLink)
-          end
-        end
-
-        local iconWidget = AceGUI:Create("Icon")
-        iconWidget:SetImage(icon)
-        iconWidget:SetImageSize(20, 20)
-        iconWidget:SetWidth(24)
-        iconWidget:SetHeight(24)
-        iconWidget:SetCallback("OnEnter", function()
-          local link = item.itemLink
-          if link and link ~= "" then
-            GameTooltip:SetOwner(iconWidget.frame, "ANCHOR_CURSOR")
-            GameTooltip:SetHyperlink(link)
-            GameTooltip:Show()
-          end
-        end)
-        iconWidget:SetCallback("OnLeave", function()
-          GameTooltip:Hide()
-        end)
-        row:AddChild(iconWidget)
-
-        local itemLabel = AceGUI:Create("InteractiveLabel")
-        itemLabel:SetWidth(240)
-        itemLabel:SetText(item.itemLink or item.itemName or "Unknown Item")
-        itemLabel:SetCallback("OnEnter", function()
-          local link = item.itemLink
-          if link and link ~= "" then
-            GameTooltip:SetOwner(itemLabel.frame, "ANCHOR_CURSOR")
-            GameTooltip:SetHyperlink(link)
-            GameTooltip:Show()
-          end
-        end)
-        itemLabel:SetCallback("OnLeave", function()
-          GameTooltip:Hide()
-        end)
-        row:AddChild(itemLabel)
-
-        local winnerLabel = AceGUI:Create("Label")
-        winnerLabel:SetWidth(160)
-        winnerLabel:SetText("Winner: " .. tostring(item.winnerName or "None"))
-        row:AddChild(winnerLabel)
-
-        self.historyDetailScroll:AddChild(row)
+      local bossKey = boss.encounterID or boss.encounterId or boss.encounterName or boss.killedAt or "boss"
+      for idx, item in ipairs(loot) do
+        local entryKey = BuildHistoryLootKey(selected.id, item, idx, bossKey)
+        AddHistoryLootEntry(self, item, entryKey)
       end
     end
   end
@@ -378,11 +512,9 @@ function UI:RefreshHistoryDetails()
     looseHeader:SetText("Session Loot (unassigned)")
     self.historyDetailScroll:AddChild(looseHeader)
 
-    for _, item in ipairs(looseLoot) do
-      local row = AceGUI:Create("Label")
-      row:SetFullWidth(true)
-      row:SetText(string.format("%s -> %s", item.itemLink or item.itemName or "Unknown Item", item.winnerName or "None"))
-      self.historyDetailScroll:AddChild(row)
+    for idx, item in ipairs(looseLoot) do
+      local entryKey = BuildHistoryLootKey(selected.id, item, idx, "loose")
+      AddHistoryLootEntry(self, item, entryKey)
     end
   end
 end

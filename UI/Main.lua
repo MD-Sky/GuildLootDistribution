@@ -197,7 +197,7 @@ function UI:ShowAdminVotePopup(session, pendingKeys, pendingLabels)
     return
   end
   if not GLD:IsAuthority() then
-    GLD:Print("Only the authority can apply admin votes.")
+    GLD:Print("Only the authority can apply overrides.")
     return
   end
 
@@ -214,50 +214,69 @@ function UI:ShowAdminVotePopup(session, pendingKeys, pendingLabels)
   frame:SetLayout("Flow")
   frame:EnableResize(false)
 
+  if GLD.IsDebugEnabled and GLD:IsDebugEnabled() then
+    local adminName = GLD:GetAuthorityName() or GLD:GetUnitFullName("player") or UnitName("player") or "Unknown"
+    local itemLabel = session.itemLink or session.itemName or "Item"
+    GLD:Debug(
+      "Admin override popup opened: rollID="
+        .. tostring(session.rollID)
+        .. " item="
+        .. tostring(itemLabel)
+        .. " by="
+        .. tostring(adminName)
+    )
+  end
+
   local dropdown = AceGUI:Create("Dropdown")
-  dropdown:SetLabel("Select Player")
+  dropdown:SetLabel("Select Winner")
   dropdown:SetFullWidth(true)
   local values = {}
+  local order = {}
+  local forceKey = "GLD_FORCE_PASS"
+  values[forceKey] = "Force Pass / Unclaimed"
+  order[#order + 1] = forceKey
   for i, key in ipairs(pendingKeys or {}) do
-    local label = pendingLabels and pendingLabels[i] or tostring(key)
-    values[key] = label
+    if key and values[key] == nil then
+      local label = pendingLabels and pendingLabels[i] or tostring(key)
+      values[key] = label
+      order[#order + 1] = key
+    end
   end
-  dropdown:SetList(values)
-  if pendingKeys and pendingKeys[1] then
-    dropdown:SetValue(pendingKeys[1])
+  dropdown:SetList(values, order)
+  local defaultKey = (pendingKeys and pendingKeys[1]) or forceKey
+  if defaultKey and values[defaultKey] then
+    dropdown:SetValue(defaultKey)
+  elseif order[1] then
+    dropdown:SetValue(order[1])
   end
   frame:AddChild(dropdown)
 
-  local function sendVote(vote)
+  local applyBtn = AceGUI:Create("Button")
+  applyBtn:SetText("Apply Override")
+  applyBtn:SetWidth(140)
+  applyBtn:SetCallback("OnClick", function()
     local key = dropdown:GetValue()
     if not key then
-      GLD:Print("Select a player first.")
+      GLD:Print("Select a winner first.")
       return
     end
-    GLD:HandleRollVote(UnitName("player") or "", {
-      rollID = session.rollID,
-      vote = vote,
-      voterKey = key,
-    })
+    if key == forceKey then
+      key = nil
+    end
+    if GLD.ApplyAdminOverride then
+      GLD:ApplyAdminOverride(session, key)
+    end
     frame:Release()
-  end
+  end)
+  frame:AddChild(applyBtn)
 
-  local buttons = {
-    { label = "Need", vote = "NEED" },
-    { label = "Greed", vote = "GREED" },
-    { label = "Transmog", vote = "TRANSMOG" },
-    { label = "Pass", vote = "PASS" },
-  }
-
-  for _, btn in ipairs(buttons) do
-    local b = AceGUI:Create("Button")
-    b:SetText(btn.label)
-    b:SetWidth(80)
-    b:SetCallback("OnClick", function()
-      sendVote(btn.vote)
-    end)
-    frame:AddChild(b)
-  end
+  local cancelBtn = AceGUI:Create("Button")
+  cancelBtn:SetText("Cancel")
+  cancelBtn:SetWidth(100)
+  cancelBtn:SetCallback("OnClick", function()
+    frame:Release()
+  end)
+  frame:AddChild(cancelBtn)
 
   self.adminVoteFrame = frame
 end
@@ -2701,6 +2720,9 @@ function UI:SubmitRollVote(session, vote, advanceTest)
       vote = vote,
       voterKey = key,
     }, channel)
+  end
+  if GLD.IsDebugEnabled and GLD:IsDebugEnabled() then
+    GLD:Debug("Vote sent: rollID=" .. tostring(session.rollID) .. " vote=" .. tostring(vote))
   end
 
   if session.locked then

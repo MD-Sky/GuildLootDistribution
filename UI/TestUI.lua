@@ -3220,7 +3220,10 @@ function TestUI:RefreshResultsPanel()
       end
     end
 
-    local winnerKey = LootEngine and LootEngine.ResolveWinner and LootEngine:ResolveWinner(votesByKey, provider, nil) or nil
+    local winnerKey = LootEngine
+      and LootEngine.ResolveWinner
+      and LootEngine:ResolveWinner(votesByKey, provider, nil, { itemLink = itemLink })
+      or nil
     local winnerName = winnerKey and provider and provider.GetPlayerName and provider:GetPlayerName(winnerKey) or nil
     local winnerArmor = "-"
     if winnerKey and provider and provider.GetPlayer then

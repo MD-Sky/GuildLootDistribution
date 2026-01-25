@@ -60,6 +60,12 @@ function GLD:StartSession()
   self.db.session.startedAt = GetServerTime()
   self.db.session.attended = {}
   self:StartRaidSession()
+  if self.RebuildGroupRoster then
+    self:RebuildGroupRoster()
+  end
+  if self.WelcomeGuestsFromGroup then
+    self:WelcomeGuestsFromGroup()
+  end
   self:AutoMarkCurrentGroup()
   self:EnsureQueuePositions()
   self:BroadcastSnapshot()
@@ -87,6 +93,9 @@ end
 function GLD:OnEncounterEnd(_, encounterID, encounterName, difficultyID, groupSize, success)
   if not self.db.session.active or success ~= 1 then
     return
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug("Boss kill detected: " .. tostring(encounterName or encounterID or "Unknown"))
   end
   local raidSession = self:GetActiveRaidSession()
   if not raidSession then
@@ -170,8 +179,17 @@ function GLD:AutoMarkCurrentGroup()
 end
 
 function GLD:OnGroupRosterUpdate()
+  local _, _, added = nil, nil, nil
+  if self.RebuildGroupRoster then
+    _, _, added = self:RebuildGroupRoster()
+  end
   if self.WelcomeGuestsFromGroup then
     self:WelcomeGuestsFromGroup()
+  end
+  if self:IsAuthority() and self.db.session.active and IsInRaid() and self.BroadcastActiveRollsSnapshot then
+    if added and #added > 0 then
+      self:BroadcastActiveRollsSnapshot(added)
+    end
   end
   if not self.db.session.active then
     if self.QueueGroupSpecSync then

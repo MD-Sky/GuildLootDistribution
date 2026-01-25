@@ -278,35 +278,67 @@ function GLD:HandleRollSession(sender, payload)
   end
 
   local isTest = payload.test == true
+  if not isTest then
+    if not self.db or not self.db.session or not self.db.session.active or not IsInRaid() then
+      if self.IsDebugEnabled and self:IsDebugEnabled() then
+        self:Debug("Ignoring roll session (not in active raid session).")
+      end
+      return
+    end
+    if self.IsAuthorizedSender then
+      local ok = self:IsAuthorizedSender(sender, payload.authorityGUID, payload.authorityName)
+      if not ok then
+        self:Debug("Blocked unauthorized roll session from " .. tostring(sender))
+        return
+      end
+    end
+  end
 
   local rollID = payload.rollID
-  local session = self.activeRolls and self.activeRolls[rollID] or nil
+  self.activeRolls = self.activeRolls or {}
+  local session = self.activeRolls[rollID]
   if not session then
     session = {
       rollID = rollID,
-      rollTime = payload.rollTime,
-      itemLink = payload.itemLink,
-      itemName = payload.itemName,
-      quality = payload.quality,
-      canNeed = payload.canNeed,
-      canGreed = payload.canGreed,
-      canTransmog = payload.canTransmog,
       votes = {},
-      expectedVoters = self:BuildExpectedVoters(),
-      createdAt = GetServerTime(),
-      isTest = isTest,
     }
-    self.activeRolls = self.activeRolls or {}
     self.activeRolls[rollID] = session
+  end
 
-    if not isTest then
-      local delay = (tonumber(payload.rollTime) or 120000) / 1000
-      C_Timer.After(delay, function()
-        local active = self.activeRolls and self.activeRolls[rollID]
-        if active and not active.locked then
-          self:FinalizeRoll(active)
-        end
-      end)
+  session.isTest = isTest
+  session.rollTime = payload.rollTime or session.rollTime
+  session.rollExpiresAt = payload.rollExpiresAt or session.rollExpiresAt
+  if not session.rollExpiresAt and payload.rollTime then
+    session.rollExpiresAt = GetServerTime() + math.floor((tonumber(payload.rollTime) or 0) / 1000)
+  end
+  session.itemLink = payload.itemLink or session.itemLink
+  session.itemName = payload.itemName or session.itemName
+  session.itemID = payload.itemID or session.itemID
+  session.itemIcon = payload.itemIcon or session.itemIcon
+  session.quality = payload.quality or session.quality
+  session.count = payload.count or session.count
+  if payload.canNeed ~= nil then
+    session.canNeed = payload.canNeed
+  end
+  if payload.canGreed ~= nil then
+    session.canGreed = payload.canGreed
+  end
+  if payload.canTransmog ~= nil then
+    session.canTransmog = payload.canTransmog
+  end
+  if payload.expectedVoters then
+    session.expectedVoters = payload.expectedVoters
+  elseif not session.expectedVoters then
+    session.expectedVoters = self:BuildExpectedVoters()
+  end
+  if payload.expectedVoterClasses then
+    session.expectedVoterClasses = payload.expectedVoterClasses
+  end
+  session.createdAt = payload.createdAt or session.createdAt or GetServerTime()
+  if payload.votes then
+    session.votes = session.votes or {}
+    for k, v in pairs(payload.votes) do
+      session.votes[k] = v
     end
   end
 
@@ -317,11 +349,29 @@ function GLD:HandleRollSession(sender, payload)
     end
   end
 
-  if (isTest or payload.reopen) and self.UI then
+  if isTest and self.UI then
     self.UI:ShowRollPopup(session)
   end
 
-  if self.UI and self.UI.ShowPendingFrame then
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    local itemLabel = payload.itemLink or payload.itemName or "Unknown"
+    self:Debug("Roll broadcast received: rollID=" .. tostring(rollID) .. " item=" .. tostring(itemLabel))
+  end
+
+  if not isTest and self:IsAuthority() and not session.timerStarted then
+    session.timerStarted = true
+    local delay = (tonumber(payload.rollTime) or 120000) / 1000
+    C_Timer.After(delay, function()
+      local active = self.activeRolls and self.activeRolls[rollID]
+      if active and not active.locked then
+        self:FinalizeRoll(active)
+      end
+    end)
+  end
+
+  if self.UI and self.UI.RefreshLootWindow then
+    self.UI:RefreshLootWindow({ forceShow = true })
+  elseif self.UI and self.UI.ShowPendingFrame then
     self.UI:ShowPendingFrame()
   end
 end
@@ -361,6 +411,16 @@ function GLD:HandleRollVote(sender, payload)
 
   session.votes = session.votes or {}
   session.votes[key] = payload.vote
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug(
+      "Vote received: rollID="
+        .. tostring(rollID)
+        .. " voter="
+        .. tostring(key)
+        .. " vote="
+        .. tostring(payload.vote)
+    )
+  end
 
   if isAuthority then
     self:CheckRollCompletion(session)
@@ -385,9 +445,9 @@ function GLD:HandleRollResult(sender, payload)
     return
   end
   if self.IsAuthorizedSender then
-    local ok = self:IsAuthorizedSender(sender)
+    local ok = self:IsAuthorizedSender(sender, payload.authorityGUID, payload.authorityName)
     if not ok then
-      self:Debug("Blocked unauthorized edit from " .. tostring(sender))
+      self:Debug("Blocked unauthorized roll result from " .. tostring(sender))
       return
     end
   end
@@ -398,6 +458,9 @@ function GLD:HandleRollResult(sender, payload)
   end
   self:RecordRollHistory(payload)
   self:Print("GLD Result: " .. tostring(payload.itemName or payload.itemLink or "Item") .. " -> " .. tostring(payload.winnerName or "None"))
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug("Result broadcast received: rollID=" .. tostring(payload.rollID))
+  end
   if self.UI and self.UI.ShowRollResultPopup then
     self.UI:ShowRollResultPopup(payload)
   end

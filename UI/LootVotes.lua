@@ -178,6 +178,21 @@ local function GetActiveVoteSessions()
   return sessions
 end
 
+local function GetSessionByKey(itemKey)
+  if not itemKey or not GLD.activeRolls then
+    return nil
+  end
+  for _, session in pairs(GLD.activeRolls) do
+    if session then
+      local key = session.rollID or session.key or session.itemLink or session.itemName
+      if key == itemKey then
+        return session
+      end
+    end
+  end
+  return nil
+end
+
 local function BuildVoteEntries(self, sessions)
   local state = GetLootWindowState(self)
   state.currentVoteItems = {}
@@ -244,6 +259,72 @@ local function GetMissingVotersForSession(session, votes)
     end
   end
   return missing
+end
+
+local function BuildAdminOverrideCandidates(session)
+  local keys = {}
+  local labels = {}
+  if not session then
+    return keys, labels
+  end
+
+  local provider = GetVoteProvider(session)
+  local expected = session.expectedVoters or {}
+  local classHint = session.expectedVoterClasses
+  local itemRef = session.itemLink or session.itemID or session.itemName
+  local canFilter = itemRef and GLD and GLD.IsEligibleForNeed
+  local itemReady = true
+  if canFilter and C_Item and C_Item.GetItemInfoInstant then
+    local classID = C_Item.GetItemInfoInstant(itemRef)
+    if not classID then
+      itemReady = false
+      if GLD.RequestItemData then
+        GLD:RequestItemData(itemRef)
+      end
+    end
+  end
+
+  local function isEligible(key)
+    if not canFilter or not itemReady then
+      return true
+    end
+    local classFile = nil
+    local specName = nil
+    if provider and provider.GetPlayer then
+      local player = provider:GetPlayer(key)
+      if player then
+        classFile = player.class or player.classToken
+        specName = player.specName or player.spec
+      end
+    end
+    if not classFile and classHint then
+      classFile = classHint[key]
+    end
+    if not classFile then
+      return true
+    end
+    return GLD:IsEligibleForNeed(classFile, itemRef, specName)
+  end
+
+  for _, key in ipairs(expected) do
+    if key and isEligible(key) then
+      keys[#keys + 1] = key
+      labels[#labels + 1] = GetVoterDisplayName(provider, key) or key
+    end
+  end
+
+  if #keys == 0 and provider and provider.GetPlayers then
+    for key, player in pairs(provider:GetPlayers() or {}) do
+      if key and isEligible(key) then
+        keys[#keys + 1] = key
+        labels[#labels + 1] = (provider.GetPlayerName and provider:GetPlayerName(key))
+          or (player and (player.name or player.fullName))
+          or tostring(key)
+      end
+    end
+  end
+
+  return keys, labels
 end
 
 function UI:GetMissingVotersForItem(itemKey)
@@ -432,6 +513,26 @@ local function EnsureLootWindow(self)
   activeTitle:SetPoint("TOPLEFT", activePanel, "TOPLEFT", 8, -6)
   activeTitle:SetText("Active Vote")
 
+  local adminOverrideButton = CreateFrame("Button", nil, activePanel, "UIPanelButtonTemplate")
+  adminOverrideButton:SetSize(120, 18)
+  adminOverrideButton:SetText("Admin Override")
+  adminOverrideButton:SetPoint("TOPRIGHT", activePanel, "TOPRIGHT", -8, -4)
+  adminOverrideButton:SetScript("OnClick", function()
+    local state = GetLootWindowState(self)
+    local entry = state.currentVoteItems[state.activeIndex]
+    local session = entry and entry.session
+    if not session then
+      return
+    end
+    if not GLD:IsAuthority() then
+      GLD:Print("Only the authority can apply overrides.")
+      return
+    end
+    local keys, labels = BuildAdminOverrideCandidates(session)
+    UI:ShowAdminVotePopup(session, keys, labels)
+  end)
+  adminOverrideButton:Hide()
+
   local activeIcon = activePanel:CreateTexture(nil, "ARTWORK")
   activeIcon:SetSize(36, 36)
   activeIcon:SetPoint("TOPLEFT", activeTitle, "BOTTOMLEFT", 0, -6)
@@ -526,6 +627,7 @@ local function EnsureLootWindow(self)
   window.activeItemLabel = activeItemLabel
   window.activeStatusLabel = statusLabel
   window.activeMessageLabel = votedLabel
+  window.adminOverrideButton = adminOverrideButton
   window.voteButtons = voteButtons
   window.pendingScroll = pendingScroll
   window.pendingScrollChild = pendingScrollChild
@@ -559,6 +661,11 @@ end
 local function UpdateActivePanel(self, state, window)
   local index = state.activeIndex
   local entry = state.currentVoteItems[index]
+  local showOverride = entry and not state.demoMode and GLD.IsAuthority and GLD:IsAuthority()
+  if window.adminOverrideButton then
+    window.adminOverrideButton:SetShown(showOverride)
+    window.adminOverrideButton:SetEnabled(showOverride)
+  end
   if not entry then
     window.activeItemLabel:SetText("No active loot roll.")
     window.activeItemLabel.link = nil
@@ -579,9 +686,13 @@ local function UpdateActivePanel(self, state, window)
     local itemIcon = select(10, GetItemInfo(link))
     if itemIcon then
       icon = itemIcon
+    elseif session and session.itemIcon then
+      icon = session.itemIcon
     else
       GLD:RequestItemData(link)
     end
+  elseif session and session.itemIcon then
+    icon = session.itemIcon
   end
   window.activeIcon:SetTexture(icon)
 
@@ -661,9 +772,13 @@ local function UpdatePendingRows(self, state, window)
       local itemIcon = select(10, GetItemInfo(link))
       if itemIcon then
         icon = itemIcon
+      elseif session and session.itemIcon then
+        icon = session.itemIcon
       else
         GLD:RequestItemData(link)
       end
+    elseif session and session.itemIcon then
+      icon = session.itemIcon
     end
     row.icon:SetTexture(icon)
     if entry.key == state.activeKey then
@@ -739,9 +854,10 @@ function UI:RefreshLootWindow(options)
   BuildVoteEntries(self, displaySessions)
   UpdateActiveSelection(self, state, options)
   local sessionActive = GLD.db and GLD.db.session and GLD.db.session.active
+  local inRaid = IsInRaid()
   local shouldShow = options.forceShow
     or state.demoMode
-    or (sessionActive and #sessions > 0)
+    or (sessionActive and inRaid and #sessions > 0)
   local window = EnsureLootWindow(self)
   if shouldShow and #state.currentVoteItems == 0 then
     state.activeKey = nil
@@ -934,4 +1050,12 @@ function UI:HandleLootVote(vote)
   if entry.session then
     self:SubmitRollVote(entry.session, vote, true)
   end
+end
+
+function UI:ShowPendingFrame()
+  self:RefreshLootWindow({ forceShow = true })
+end
+
+function UI:RefreshPendingVotes()
+  self:RefreshLootWindow()
 end

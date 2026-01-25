@@ -16,6 +16,115 @@ function GLD:InitLoot()
   end
 end
 
+local function GetRollRemainingTimeMs(session)
+  if not session then
+    return nil
+  end
+  if session.rollExpiresAt then
+    local remaining = (session.rollExpiresAt - GetServerTime()) * 1000
+    if remaining < 0 then
+      remaining = 0
+    end
+    return remaining
+  end
+  return session.rollTime
+end
+
+function GLD:BuildRollSessionPayload(session, options)
+  if not session then
+    return nil
+  end
+  local votes = nil
+  if session.votes then
+    votes = {}
+    for k, v in pairs(session.votes) do
+      votes[k] = v
+    end
+  end
+  local expected = nil
+  if session.expectedVoters then
+    expected = {}
+    for i, key in ipairs(session.expectedVoters) do
+      expected[i] = key
+    end
+  end
+  local expectedClasses = nil
+  if session.expectedVoterClasses then
+    expectedClasses = {}
+    for k, v in pairs(session.expectedVoterClasses) do
+      expectedClasses[k] = v
+    end
+  end
+
+  return {
+    rollID = session.rollID,
+    rollTime = GetRollRemainingTimeMs(session),
+    rollExpiresAt = session.rollExpiresAt,
+    itemLink = session.itemLink,
+    itemName = session.itemName,
+    itemID = session.itemID,
+    itemIcon = session.itemIcon,
+    quality = session.quality,
+    count = session.count,
+    canNeed = session.canNeed,
+    canGreed = session.canGreed,
+    canTransmog = session.canTransmog,
+    expectedVoters = expected,
+    expectedVoterClasses = expectedClasses,
+    createdAt = session.createdAt,
+    votes = votes,
+    authorityGUID = self:GetAuthorityGUID(),
+    authorityName = self:GetAuthorityName(),
+    reopen = options and options.reopen or nil,
+    snapshot = options and options.snapshot or nil,
+  }
+end
+
+function GLD:BroadcastRollSession(session, options, target)
+  if not session or session.isTest then
+    return
+  end
+  local payload = self:BuildRollSessionPayload(session, options)
+  if not payload then
+    return
+  end
+  if target and target ~= "" then
+    self:SendCommMessageSafe(NS.MSG.ROLL_SESSION, payload, "WHISPER", target)
+    return
+  end
+  local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or nil)
+  if not channel then
+    return
+  end
+  self:SendCommMessageSafe(NS.MSG.ROLL_SESSION, payload, channel)
+end
+
+function GLD:BroadcastActiveRollsSnapshot(targets)
+  if not self:IsAuthority() then
+    return
+  end
+  if not self.db or not self.db.session or not self.db.session.active then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  if not self.activeRolls then
+    return
+  end
+  for _, session in pairs(self.activeRolls) do
+    if session and not session.locked and not session.isTest then
+      if targets and #targets > 0 then
+        for _, target in ipairs(targets) do
+          self:BroadcastRollSession(session, { snapshot = true }, target)
+        end
+      else
+        self:BroadcastRollSession(session, { snapshot = true })
+      end
+    end
+  end
+end
+
 function GLD:CleanupOldTestRolls(maxAgeSeconds)
   if not self.activeRolls then
     return
@@ -142,13 +251,66 @@ function GLD:ResolveRollWinner(session)
   end
   if LootEngine and LootEngine.ResolveWinner then
     local provider = session.isTest and TestProvider or LiveProvider
-    return LootEngine:ResolveWinner(session.votes or {}, provider, session.rules)
+    return LootEngine:ResolveWinner(session.votes or {}, provider, session.rules, session)
   end
   return nil
 end
 
+local function NormalizeVoteKey(provider, key)
+  if provider and provider.GetPlayerName then
+    local name = provider:GetPlayerName(key)
+    if name and name ~= "" then
+      return name
+    end
+  end
+  return key
+end
+
+local function SnapshotVotes(votes, provider)
+  local snapshot = {}
+  local counts = { NEED = 0, GREED = 0, TRANSMOG = 0, PASS = 0 }
+  if votes then
+    for key, vote in pairs(votes) do
+      local displayKey = NormalizeVoteKey(provider, key)
+      snapshot[displayKey] = vote
+      if vote and counts[vote] ~= nil then
+        counts[vote] = counts[vote] + 1
+      end
+    end
+  end
+  return snapshot, counts
+end
+
+local function BuildMissingAtLock(expectedVoters, votes, provider)
+  if not expectedVoters then
+    return nil
+  end
+  local missing = {}
+  for _, key in ipairs(expectedVoters) do
+    local displayKey = key and NormalizeVoteKey(provider, key) or nil
+    if displayKey and not (votes and votes[displayKey]) then
+      missing[#missing + 1] = displayKey
+    end
+  end
+  if #missing == 0 then
+    return nil
+  end
+  return missing
+end
+
+local function CountVotes(votes)
+  local count = 0
+  for _ in pairs(votes or {}) do
+    count = count + 1
+  end
+  return count
+end
+
 function GLD:FinalizeRoll(session)
   if not session or session.locked then
+    return
+  end
+  if not session.isTest and not self:IsAuthority() then
     return
   end
   local winnerKey = self:ResolveRollWinner(session)
@@ -164,18 +326,30 @@ function GLD:FinalizeRoll(session)
     winnerFull = winnerPlayer.name .. "-" .. winnerPlayer.realm
   end
 
+  local resolvedAt = GetServerTime()
+  local voteSnapshot, voteCounts = SnapshotVotes(session.votes, provider)
+  local missingAtLock = BuildMissingAtLock(session.expectedVoters, voteSnapshot, provider)
+  local startedAt = session.createdAt or resolvedAt
+  local resolvedBy = session.resolvedBy or "NORMAL"
   local result = {
     rollID = session.rollID,
     itemLink = session.itemLink,
     itemName = session.itemName,
     winnerKey = winnerKey,
     winnerName = winnerFull,
-    votes = session.votes or {},
-    resolvedAt = GetServerTime(),
+    votes = voteSnapshot,
+    voteCounts = voteCounts,
+    missingAtLock = missingAtLock,
+    startedAt = startedAt,
+    resolvedAt = resolvedAt,
+    resolvedBy = resolvedBy,
   }
 
   session.locked = true
   session.result = result
+  if self:IsDebugEnabled() then
+    self:Debug("Result locked: rollID=" .. tostring(session.rollID) .. " winner=" .. tostring(winnerFull))
+  end
 
   if not session.isTest then
     self:RecordRollHistory(result)
@@ -199,10 +373,112 @@ function GLD:FinalizeRoll(session)
     end
     local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
     self:SendCommMessageSafe(NS.MSG.ROLL_RESULT, result, channel)
+    if self:IsDebugEnabled() then
+      self:Debug("Result broadcast: rollID=" .. tostring(session.rollID))
+    end
   end
   if self.UI and self.UI.RefreshLootWindow then
     self.UI:RefreshLootWindow()
   end
+end
+
+function GLD:ApplyAdminOverride(session, winnerKey)
+  if not session or session.locked then
+    return false
+  end
+  if not self:IsAuthority() then
+    return false
+  end
+
+  local overrideBy = self:GetAuthorityName() or self:GetUnitFullName("player") or UnitName("player") or "Unknown"
+  local isPass = not winnerKey or winnerKey == "" or winnerKey == "GLD_FORCE_PASS"
+  if isPass then
+    winnerKey = nil
+  end
+
+  local provider = session.isTest and TestProvider or LiveProvider
+  local winnerPlayer = winnerKey and provider and provider.GetPlayer and provider:GetPlayer(winnerKey) or nil
+  local winnerName = winnerPlayer and winnerPlayer.name or (winnerKey or "None")
+  local winnerFull = winnerName
+  if winnerPlayer and winnerPlayer.realm and winnerPlayer.realm ~= "" then
+    winnerFull = winnerPlayer.name .. "-" .. winnerPlayer.realm
+  end
+  if isPass then
+    winnerFull = "Unclaimed"
+  end
+
+  if winnerKey and LootEngine and LootEngine.CommitAward then
+    LootEngine:CommitAward(winnerKey, session, provider)
+  end
+
+  local resolvedAt = GetServerTime()
+  local voteSnapshot, voteCounts = SnapshotVotes(session.votes, provider)
+  local missingAtLock = BuildMissingAtLock(session.expectedVoters, voteSnapshot, provider)
+  local startedAt = session.createdAt or resolvedAt
+  local authorityGUID = self:GetAuthorityGUID()
+  local authorityName = self:GetAuthorityName()
+  local result = {
+    rollID = session.rollID,
+    itemLink = session.itemLink,
+    itemName = session.itemName,
+    winnerKey = winnerKey,
+    winnerName = winnerFull,
+    votes = voteSnapshot,
+    voteCounts = voteCounts,
+    missingAtLock = missingAtLock,
+    startedAt = startedAt,
+    resolvedAt = resolvedAt,
+    resolvedBy = "OVERRIDE",
+    overrideBy = overrideBy,
+    authorityGUID = authorityGUID,
+    authorityName = authorityName,
+  }
+
+  session.locked = true
+  session.result = result
+  if self:IsDebugEnabled() then
+    self:Debug(
+      "Override applied: rollID="
+        .. tostring(session.rollID)
+        .. " item="
+        .. tostring(session.itemLink or session.itemName or "Item")
+        .. " winner="
+        .. tostring(winnerFull)
+        .. " by="
+        .. tostring(overrideBy)
+    )
+  end
+
+  if not session.isTest then
+    self:RecordRollHistory(result)
+  end
+  if session.isTest then
+    self:RecordTestSessionLoot(result, session)
+  else
+    self:RecordSessionLoot(result, session)
+  end
+  if session.isTest and winnerKey and self.MoveTestPlayerToQueueBottom then
+    self:MoveTestPlayerToQueueBottom(winnerKey)
+    if NS.TestUI and NS.TestUI.RefreshTestPanel then
+      NS.TestUI:RefreshTestPanel()
+    end
+  end
+  if self:IsAuthority() and not session.isTest then
+    self:AnnounceRollResult(result)
+    if winnerKey then
+      self:MoveToQueueBottom(winnerKey)
+      self:BroadcastSnapshot()
+    end
+    local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
+    self:SendCommMessageSafe(NS.MSG.ROLL_RESULT, result, channel)
+    if self:IsDebugEnabled() then
+      self:Debug("Override result broadcast: rollID=" .. tostring(session.rollID))
+    end
+  end
+  if self.UI and self.UI.RefreshLootWindow then
+    self.UI:RefreshLootWindow()
+  end
+  return true
 end
 
 function GLD:RecordTestSessionLoot(result, session)
@@ -220,8 +496,18 @@ function GLD:RecordTestSessionLoot(result, session)
     itemName = result.itemName,
     winnerKey = result.winnerKey,
     winnerName = result.winnerName,
+    votes = result.votes,
+    voteCounts = result.voteCounts,
+    missingAtLock = result.missingAtLock,
+    startedAt = result.startedAt,
     resolvedAt = result.resolvedAt or GetServerTime(),
+    resolvedBy = result.resolvedBy or "NORMAL",
+    overrideBy = result.overrideBy,
   }
+
+  if self:IsDebugEnabled() then
+    self:Debug("Test history entry saved votes: rollID=" .. tostring(result.rollID) .. " votes=" .. tostring(CountVotes(lootEntry.votes)))
+  end
 
   testSession.loot = testSession.loot or {}
   table.insert(testSession.loot, 1, lootEntry)
@@ -270,8 +556,18 @@ function GLD:RecordSessionLoot(result, session)
     itemName = result.itemName,
     winnerKey = result.winnerKey,
     winnerName = result.winnerName,
+    votes = result.votes,
+    voteCounts = result.voteCounts,
+    missingAtLock = result.missingAtLock,
+    startedAt = result.startedAt,
     resolvedAt = result.resolvedAt or GetServerTime(),
+    resolvedBy = result.resolvedBy or "NORMAL",
+    overrideBy = result.overrideBy,
   }
+
+  if self:IsDebugEnabled() then
+    self:Debug("History entry saved votes: rollID=" .. tostring(result.rollID) .. " votes=" .. tostring(CountVotes(lootEntry.votes)))
+  end
 
   raidSession.loot = raidSession.loot or {}
   table.insert(raidSession.loot, 1, lootEntry)
@@ -329,59 +625,80 @@ function GLD:NoteMismatch(session, playerName, expectedVote, actualVote)
 end
 
 function GLD:OnStartLootRoll(rollID, rollTime, lootHandle)
+  if not IsInRaid() or not self.db or not self.db.session or not self.db.session.active then
+    if self:IsDebugEnabled() then
+      self:Debug("Ignoring START_LOOT_ROLL (not in active raid session).")
+    end
+    return
+  end
+  if not self:IsAuthority() then
+    if self:IsDebugEnabled() then
+      self:Debug("Ignoring START_LOOT_ROLL (not authority).")
+    end
+    return
+  end
+
+  self.activeRolls = self.activeRolls or {}
+  if self.activeRolls[rollID] then
+    if self:IsDebugEnabled() then
+      self:Debug("Duplicate START_LOOT_ROLL ignored: rollID=" .. tostring(rollID))
+    end
+    return
+  end
+
   local texture, name, count, quality, bop, canNeed, canGreed, canDE, canTransmog, reason = GetLootRollItemInfo(rollID)
   local link = GetLootRollItemLink(rollID)
+  local itemID = nil
+  if link and GetItemInfoInstant then
+    itemID = select(1, GetItemInfoInstant(link))
+  end
+
+  local rollTimeMs = tonumber(rollTime) or 120000
+  local createdAt = GetServerTime()
+  local rollExpiresAt = rollTimeMs > 0 and (createdAt + math.floor(rollTimeMs / 1000)) or nil
 
   local session = {
     rollID = rollID,
-    rollTime = rollTime,
+    rollTime = rollTimeMs,
+    rollExpiresAt = rollExpiresAt,
     itemLink = link,
     itemName = name,
+    itemID = itemID,
+    itemIcon = texture,
     quality = quality,
+    count = count,
     canNeed = canNeed,
     canGreed = canGreed,
     canTransmog = canTransmog,
     votes = {},
     expectedVoters = self:BuildExpectedVoters(),
-    createdAt = GetServerTime(),
+    createdAt = createdAt,
   }
   self.activeRolls[rollID] = session
+
+  if self:IsDebugEnabled() then
+    self:Debug("Roll started detected: rollID=" .. tostring(rollID) .. " item=" .. tostring(link or name or "Unknown"))
+  end
 
   if link then
     self:RequestItemData(link)
   end
 
-  if self.UI then
-    self.UI:ShowRollPopup(session)
-    if self.UI.RefreshLootWindow then
-      self.UI:RefreshLootWindow({ forceShow = true })
-    end
+  self:BroadcastRollSession(session)
+
+  if self.UI and self.UI.RefreshLootWindow then
+    self.UI:RefreshLootWindow({ forceShow = true })
   end
 
-  if not self:IsAuthority() then
-    local authority = self:GetAuthorityName()
-    if authority then
-      self:SendCommMessageSafe(NS.MSG.ROLL_SESSION, {
-        rollID = rollID,
-        rollTime = rollTime,
-        itemLink = link,
-        itemName = name,
-        canNeed = canNeed,
-        canGreed = canGreed,
-        canTransmog = canTransmog,
-      }, "WHISPER", authority)
+  local delay = (tonumber(rollTimeMs) or 120000) / 1000
+  session.timerStarted = true
+  C_Timer.After(delay, function()
+    local active = self.activeRolls and self.activeRolls[rollID]
+    if active and not active.locked then
+      self:FinalizeRoll(active)
     end
-  else
-    local delay = (tonumber(rollTime) or 120000) / 1000
-    C_Timer.After(delay, function()
-      local active = self.activeRolls and self.activeRolls[rollID]
-      if active and not active.locked then
-        self:FinalizeRoll(active)
-      end
-    end)
-  end
+  end)
 
-  local delay = (tonumber(rollTime) or 120000) / 1000
   C_Timer.After(delay + 1, function()
     self:OnLootHistoryRollChanged()
   end)

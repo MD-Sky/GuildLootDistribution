@@ -169,12 +169,10 @@ function GLD:MaybeWelcomeGuest(unit, fullName)
   guestDB.seenGuests = guestDB.seenGuests or {}
   guestDB.lastGuestWelcomeAt = guestDB.lastGuestWelcomeAt or {}
 
-  local now = time()
-  local last = guestDB.lastGuestWelcomeAt[guid] or 0
-  if not guestDB.seenGuests[guid] or (now - last > 600) then
+  if not guestDB.seenGuests[guid] then
     guestDB.seenGuests[guid] = true
-    guestDB.lastGuestWelcomeAt[guid] = now
-    local msg = "Welcome to the Incompetents' Guild raid! Heads up: we're using GuildLootTable for loot this run. Guests have view + request only (loot table editing is restricted)."
+    guestDB.lastGuestWelcomeAt[guid] = time()
+    local msg = "Welcome to the Incompetents guild raid. This raid uses our loot system. Guests can vote, but cannot edit our loot table/admin settings."
     SendChatMessage(msg, "WHISPER", nil, fullName)
   end
 end
@@ -204,6 +202,60 @@ function GLD:WelcomeGuestsFromGroup()
     end
     visit("player")
   end
+end
+
+function GLD:RebuildGroupRoster()
+  local roster = {}
+  local rosterByKey = {}
+  local currentKeys = {}
+  local added = {}
+  local previousKeys = self.groupRosterKeys or {}
+  local ourGuild = self:GetOurGuildName()
+
+  local function addUnit(unit)
+    if not unit or not UnitExists(unit) then
+      return
+    end
+    local key = NS:GetPlayerKeyFromUnit(unit)
+    local name, realm = UnitName(unit)
+    local fullName = self:GetUnitFullName(unit)
+    local guildName = GetGuildInfo(unit)
+    local isGuildMember = ourGuild and guildName and guildName == ourGuild or false
+    local entry = {
+      unit = unit,
+      key = key,
+      name = name,
+      realm = realm,
+      fullName = fullName,
+      isGuildMember = isGuildMember,
+    }
+    roster[#roster + 1] = entry
+    if key then
+      rosterByKey[key] = entry
+      currentKeys[key] = true
+      if not previousKeys[key] and fullName and not UnitIsUnit(unit, "player") then
+        added[#added + 1] = fullName
+      end
+    end
+  end
+
+  if IsInRaid() then
+    for i = 1, GetNumGroupMembers() do
+      addUnit("raid" .. i)
+    end
+  elseif IsInGroup() then
+    for i = 1, GetNumSubgroupMembers() do
+      addUnit("party" .. i)
+    end
+    addUnit("player")
+  else
+    addUnit("player")
+  end
+
+  self.groupRoster = roster
+  self.groupRosterByKey = rosterByKey
+  self.groupRosterKeys = currentKeys
+  return roster, rosterByKey, added
 end
 
 function GLD:CanAccessAdminUI()
