@@ -65,13 +65,6 @@ function GLD:GetAuthorityName()
           return name
         end
       end
-    elseif IsInGroup() then
-      for i = 1, GetNumSubgroupMembers() do
-        name = tryUnit("party" .. i)
-        if name then
-          return name
-        end
-      end
     end
   end
   return nil

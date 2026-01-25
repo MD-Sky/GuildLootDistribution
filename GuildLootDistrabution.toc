@@ -2,7 +2,7 @@
 ## Title: GuildLootDistrabution
 ## Notes: Guild loot queue and distribution manager
 ## Author: GuildLoot
-## Version: 0.2.1
+## Version: 0.2.2
 ## SavedVariables: GuildLootDB, GuildLootTestDB, GLT_DB
 ## SavedVariablesPerCharacter: GuildLootShadow
 ## OptionalDeps: Ace3

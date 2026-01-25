@@ -78,7 +78,7 @@ UI/HistoryUI.lua      - Raid history viewer
 ```
 
 ### To Test
-- Snapshot broadcast reaches party members when not in a raid
+- Snapshot broadcast stays raid-only
 - Test roll cleanup runs periodically without affecting live rolls
 - Loot history mismatch detection still catches vote discrepancies
 - Solo simulate-items uses the consolidated vote popup and records all test player votes
@@ -100,6 +100,9 @@ Player specifications are automatically detected via:
 - Integration with raid group roster updates
 
 ## Version History
+
+### v0.2.2
+- Release version bump.
 
 ### v0.2.1
 - Patch release for release workflow and packaging alignment.

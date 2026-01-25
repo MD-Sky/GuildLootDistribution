@@ -158,6 +158,24 @@ function GLD:HandleStateSnapshot(sender, payload)
   end
   if payload.roster then
     self.shadow.roster = payload.roster
+    if self.UpdateShadowMyFromRoster then
+      self:UpdateShadowMyFromRoster(self.shadow.roster)
+    end
+  end
+  if payload.sessionActive ~= nil then
+    self.shadow.sessionActive = payload.sessionActive == true
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    local rosterCount = (self.shadow and self.shadow.roster and #self.shadow.roster) or 0
+    local my = self.shadow and self.shadow.my or nil
+    self:Debug(
+      "Snapshot received: rosterSource=shadow.roster rosterCount="
+        .. tostring(rosterCount)
+        .. " myQueue="
+        .. tostring(my and my.queuePos or "nil")
+        .. " myHeld="
+        .. tostring(my and my.savedPos or "nil")
+    )
   end
   if self.UI then
     self.UI:RefreshMain()
@@ -180,6 +198,9 @@ function GLD:HandleDelta(sender, payload)
   end
   if payload.roster then
     self.shadow.roster = payload.roster
+    if self.UpdateShadowMyFromRoster then
+      self:UpdateShadowMyFromRoster(self.shadow.roster)
+    end
   end
   if self.UI then
     self.UI:RefreshMain()
@@ -195,17 +216,19 @@ function GLD:BuildSnapshot()
     attendanceCount = nil,
   }
 
-  if not self.db or not self.db.players then
-    -- DB not ready yet; return a safe empty snapshot.
-    return {
-      my = my,
-      roster = {},
-      rosterHash = nil,
-      configHash = self:ComputeConfigHash(),
-      authorityGUID = self:GetAuthorityGUID(),
-      authorityName = self:GetAuthorityName(),
-    }
-  end
+    if not self.db or not self.db.players then
+      -- DB not ready yet; return a safe empty snapshot.
+      local sessionActive = self.db and self.db.session and self.db.session.active == true
+      return {
+        my = my,
+        roster = {},
+        rosterHash = nil,
+        configHash = self:ComputeConfigHash(),
+        sessionActive = sessionActive,
+        authorityGUID = self:GetAuthorityGUID(),
+        authorityName = self:GetAuthorityName(),
+      }
+    end
 
   local roster = {}
   for key, player in pairs(self.db.players) do
@@ -230,8 +253,9 @@ function GLD:BuildSnapshot()
     })
   end
 
-  local rosterHash = self:ComputeRosterHashFromSnapshot(roster)
-  local configHash = self:ComputeConfigHash()
+    local rosterHash = self:ComputeRosterHashFromSnapshot(roster)
+    local configHash = self:ComputeConfigHash()
+    local sessionActive = self.db and self.db.session and self.db.session.active == true
 
   local myKey = NS:GetPlayerKeyFromUnit("player")
   if myKey then
@@ -245,31 +269,26 @@ function GLD:BuildSnapshot()
     end
   end
 
-  return {
-    my = my,
-    roster = roster,
-    rosterHash = rosterHash,
-    configHash = configHash,
-    authorityGUID = self:GetAuthorityGUID(),
-    authorityName = self:GetAuthorityName(),
-  }
-end
+    return {
+      my = my,
+      roster = roster,
+      rosterHash = rosterHash,
+      configHash = configHash,
+      sessionActive = sessionActive,
+      authorityGUID = self:GetAuthorityGUID(),
+      authorityName = self:GetAuthorityName(),
+    }
+  end
 
 function GLD:BroadcastSnapshot()
   if not self:IsAuthority() then
     return
   end
-  local channel = nil
-  if IsInRaid() then
-    channel = "RAID"
-  elseif IsInGroup() then
-    -- Use PARTY outside raids so snapshots reach party members.
-    channel = "PARTY"
-  else
+  if not IsInRaid() then
     return
   end
   local snapshot = self:BuildSnapshot()
-  self:SendCommMessageSafe(NS.MSG.STATE_SNAPSHOT, snapshot, channel)
+  self:SendCommMessageSafe(NS.MSG.STATE_SNAPSHOT, snapshot, "RAID")
 end
 
 function GLD:HandleRollSession(sender, payload)
@@ -295,15 +314,39 @@ function GLD:HandleRollSession(sender, payload)
   end
 
   local rollID = payload.rollID
+  local rollKey = self.GetRollKeyFromPayload and self:GetRollKeyFromPayload(payload) or nil
+  if not rollKey then
+    return
+  end
+
   self.activeRolls = self.activeRolls or {}
-  local session = self.activeRolls[rollID]
+  if self.CleanupActiveRolls then
+    self:CleanupActiveRolls(1800)
+  end
+
+  local session = self.activeRolls[rollKey]
+  if not session and payload.rollKey and self.GetLegacyRollKey then
+    local legacyKey = self:GetLegacyRollKey(rollID)
+    session = self.activeRolls[legacyKey]
+    if session then
+      self.activeRolls[legacyKey] = nil
+      self.activeRolls[rollKey] = session
+    end
+  end
+  if session and self.IsRollSessionExpired and self:IsRollSessionExpired(session, nil, 1800) then
+    self.activeRolls[rollKey] = nil
+    session = nil
+  end
   if not session then
     session = {
       rollID = rollID,
+      rollKey = rollKey,
       votes = {},
     }
-    self.activeRolls[rollID] = session
+    self.activeRolls[rollKey] = session
   end
+  session.rollID = rollID or session.rollID
+  session.rollKey = rollKey
 
   session.isTest = isTest
   session.rollTime = payload.rollTime or session.rollTime
@@ -356,13 +399,19 @@ function GLD:HandleRollSession(sender, payload)
   if self.IsDebugEnabled and self:IsDebugEnabled() then
     local itemLabel = payload.itemLink or payload.itemName or "Unknown"
     self:Debug("Roll broadcast received: rollID=" .. tostring(rollID) .. " item=" .. tostring(itemLabel))
+    local count = 0
+    for _ in pairs(self.activeRolls or {}) do
+      count = count + 1
+    end
+    self:Debug("Roll session tracked: rollID=" .. tostring(rollID) .. " rollKey=" .. tostring(rollKey) .. " active=" .. tostring(count))
   end
 
   if not isTest and self:IsAuthority() and not session.timerStarted then
     session.timerStarted = true
     local delay = (tonumber(payload.rollTime) or 120000) / 1000
     C_Timer.After(delay, function()
-      local active = self.activeRolls and self.activeRolls[rollID]
+      local activeKey = session and session.rollKey
+      local active = self.activeRolls and activeKey and self.activeRolls[activeKey] or nil
       if active and not active.locked then
         self:FinalizeRoll(active)
       end
@@ -377,7 +426,7 @@ function GLD:HandleRollSession(sender, payload)
 end
 
 function GLD:HandleRollVote(sender, payload)
-  if not payload or not payload.rollID then
+  if not payload then
     return
   end
 
@@ -399,7 +448,14 @@ function GLD:HandleRollVote(sender, payload)
   end
 
   local rollID = payload.rollID
-  local session = self.activeRolls and self.activeRolls[rollID] or nil
+  local rollKey = self.GetRollKeyFromPayload and self:GetRollKeyFromPayload(payload) or nil
+  local session = nil
+  if self.FindActiveRoll then
+    _, session = self:FindActiveRoll(rollKey, rollID)
+  end
+  if not session then
+    session = self.activeRolls and rollKey and self.activeRolls[rollKey] or nil
+  end
   if not session or session.locked then
     return
   end
@@ -424,14 +480,14 @@ function GLD:HandleRollVote(sender, payload)
 
   if isAuthority then
     self:CheckRollCompletion(session)
-    local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
-    if channel ~= "SAY" then
+    if IsInRaid() then
       self:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
         rollID = rollID,
+        rollKey = session.rollKey or rollKey,
         vote = payload.vote,
         voterKey = key,
         broadcast = true,
-      }, channel)
+      }, "RAID")
     end
   end
 
@@ -441,7 +497,7 @@ function GLD:HandleRollVote(sender, payload)
 end
 
 function GLD:HandleRollResult(sender, payload)
-  if not payload or not payload.rollID then
+  if not payload then
     return
   end
   if self.IsAuthorizedSender then
@@ -452,14 +508,37 @@ function GLD:HandleRollResult(sender, payload)
     end
   end
   local rollID = payload.rollID
-  if self.activeRolls and self.activeRolls[rollID] then
-    self.activeRolls[rollID].locked = true
-    self.activeRolls[rollID].result = payload
+  local rollKey = self.GetRollKeyFromPayload and self:GetRollKeyFromPayload(payload) or nil
+  local sessionKey = nil
+  local session = nil
+  if self.FindActiveRoll then
+    sessionKey, session = self:FindActiveRoll(rollKey, rollID)
+  end
+  if not session then
+    sessionKey = rollKey
+    session = self.activeRolls and rollKey and self.activeRolls[rollKey] or nil
+  end
+  if session then
+    session.locked = true
+    session.result = payload
   end
   self:RecordRollHistory(payload)
   self:Print("GLD Result: " .. tostring(payload.itemName or payload.itemLink or "Item") .. " -> " .. tostring(payload.winnerName or "None"))
   if self.IsDebugEnabled and self:IsDebugEnabled() then
-    self:Debug("Result broadcast received: rollID=" .. tostring(payload.rollID))
+    self:Debug("Result broadcast received: rollID=" .. tostring(payload.rollID) .. " rollKey=" .. tostring(rollKey))
+  end
+  if sessionKey and self.activeRolls then
+    self.activeRolls[sessionKey] = nil
+  end
+  if self.CleanupActiveRolls then
+    self:CleanupActiveRolls(1800)
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    local count = 0
+    for _ in pairs(self.activeRolls or {}) do
+      count = count + 1
+    end
+    self:Debug("Roll result pruned: rollID=" .. tostring(rollID) .. " rollKey=" .. tostring(rollKey) .. " active=" .. tostring(count))
   end
   if self.UI and self.UI.ShowRollResultPopup then
     self.UI:ShowRollResultPopup(payload)

@@ -228,15 +228,20 @@ function UI:ToggleHistory()
     GLD:Print("you do not have Guild Permission to access this panel")
     return
   end
+  local created = false
   if not self.historyFrame then
     self:CreateHistoryFrame()
+    created = true
   end
-  if self.historyFrame:IsShown() then
-    self.historyFrame:Hide()
-  else
+  if not self.historyFrame then
+    return
+  end
+  if created or not self.historyFrame:IsShown() then
     self.historyFrame:Show()
     self:RefreshHistoryList()
     self:RefreshHistoryDetails()
+  else
+    self.historyFrame:Hide()
   end
 end
 
@@ -328,6 +333,14 @@ function UI:CreateHistoryFrame()
   self.historyRaidFilterWidget = raidFilter
   self.historyDiffFilterWidget = diffFilter
   self.historyRangeFilterWidget = rangeFilter
+end
+
+function UI:RefreshHistoryIfOpen()
+  if not self.historyFrame or not self.historyFrame:IsShown() then
+    return
+  end
+  self:RefreshHistoryList()
+  self:RefreshHistoryDetails()
 end
 
 function UI:RefreshHistoryList()

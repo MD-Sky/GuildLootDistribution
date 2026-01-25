@@ -66,12 +66,11 @@ local function EnsureUnitPopupEntry()
     table.insert(menu, MENU_BUTTON_KEY)
   end
 
-  addToMenu("PARTY")
   addToMenu("RAID")
   addToMenu("RAID_PLAYER")
 
   if GLD and GLD.Print then
-    GLD:Print("GLD menu added to party/raid right-click menus.")
+    GLD:Print("GLD menu added to raid right-click menus.")
   end
 
   return true

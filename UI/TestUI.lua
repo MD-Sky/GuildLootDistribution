@@ -249,7 +249,7 @@ local function BuildSpecOptionsForClass(classToken)
 end
 
 local function BuildDynamicTestVoters()
-  if not IsInGroup() then
+  if not IsInRaid() then
     return nil
   end
 
@@ -284,15 +284,8 @@ local function BuildDynamicTestVoters()
     }
   end
 
-  if IsInRaid() then
-    for i = 1, GetNumGroupMembers() do
-      addUnit("raid" .. i)
-    end
-  else
-    for i = 1, GetNumSubgroupMembers() do
-      addUnit("party" .. i)
-    end
-    addUnit("player")
+  for i = 1, GetNumGroupMembers() do
+    addUnit("raid" .. i)
   end
 
   if #voters > 0 then
@@ -302,7 +295,7 @@ local function BuildDynamicTestVoters()
 end
 
 local function IsSolo()
-  return not IsInGroup() and not IsInRaid()
+  return not IsInRaid()
 end
 
 local function GetTestDB()
@@ -1732,7 +1725,7 @@ function TestUI:CreateTestFrame()
 
   local resultsAbsentBtn = CreateFrame("Button", nil, resultsControls, "UIPanelButtonTemplate")
   resultsAbsentBtn:SetSize(140, ADMIN_BUTTON_HEIGHT)
-  resultsAbsentBtn:SetText("Set Party Absent")
+  resultsAbsentBtn:SetText("Set Raid Absent")
   resultsAbsentBtn:SetScript("OnClick", function()
     local activeVoters = GetActiveVoters()
     for _, entry in ipairs(activeVoters or {}) do
@@ -2309,7 +2302,7 @@ function TestUI:PopulatePlayerRow(row, data)
 
   if cells.mark then
     if data.isGuest then
-      cells.mark:SetText("Party Member")
+      cells.mark:SetText("Guest")
       if cells.mark.SetEnabled then
         cells.mark:SetEnabled(false)
       end
@@ -3289,7 +3282,7 @@ function TestUI:RefreshResultsPanel()
   end
 
   if self.resultsResetSoloBtn then
-    local showReset = self.disableManualVotes and not IsInGroup() and not IsInRaid()
+    local showReset = self.disableManualVotes and not IsInRaid()
     self.resultsResetSoloBtn:SetShown(showReset)
   end
   local solo = IsSolo()
@@ -3835,9 +3828,15 @@ function TestUI:SimulateLootRoll(itemLink)
 
   local rollID = math.random(1, 10000)
   local rollTime = 120
+  local rollKey = nil
+  if GLD and GLD.BuildRollNonce and GLD.MakeRollKey then
+    rollKey = GLD:MakeRollKey(rollID, GLD:BuildRollNonce())
+  end
+  rollKey = rollKey or (tostring(rollID) .. "@legacy")
 
   local session = {
     rollID = rollID,
+    rollKey = rollKey,
     rollTime = rollTime,
     itemLink = displayLink,
     itemName = displayName,
@@ -3860,12 +3859,12 @@ function TestUI:SimulateLootRoll(itemLink)
     session.expectedVoters = solo and BuildSoloExpectedVoters(activeVoters) or GLD:BuildExpectedVoters()
   end
 
-  GLD.activeRolls[rollID] = session
-  self.currentTestRollID = rollID
+  GLD.activeRolls[rollKey] = session
+  self.currentTestRollID = rollKey
 
   if GLD.UI then
     local voter = nil
-    if not solo and (IsInGroup() or IsInRaid()) then
+    if not solo and IsInRaid() then
       local name, realm = UnitName("player")
       if name then
         voter = realm and realm ~= "" and (name .. "-" .. realm) or name
@@ -3885,10 +3884,11 @@ function TestUI:SimulateLootRoll(itemLink)
     end
   end
 
-  if IsInRaid() or IsInGroup() then
-    local channel = IsInRaid() and "RAID" or "PARTY"
+  if IsInRaid() then
+    local channel = "RAID"
     GLD:SendCommMessageSafe(NS.MSG.ROLL_SESSION, {
       rollID = rollID,
+      rollKey = rollKey,
       rollTime = rollTime * 1000,
       itemLink = displayLink,
       itemName = displayName,
@@ -3911,7 +3911,7 @@ function TestUI:AdvanceTestVoter()
   end
   self:RefreshVotePanel()
   self:RefreshResultsPanel()
-  local soloLive = self.disableManualVotes and not IsInGroup() and not IsInRaid()
+  local soloLive = self.disableManualVotes and not IsInRaid()
   if not soloLive and self.currentVoterIndex <= (#activeVoters - 1) then
     if self.itemLinkInput then
       self:SimulateLootRoll(self.itemLinkInput:GetText())

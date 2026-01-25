@@ -127,13 +127,6 @@ function GLD:GetGuidForSender(sender)
         return UnitGUID(unit)
       end
     end
-  elseif IsInGroup() then
-    for i = 1, GetNumSubgroupMembers() do
-      local unit = "party" .. i
-      if matches(unit) then
-        return UnitGUID(unit)
-      end
-    end
   end
 
   return nil
@@ -178,7 +171,7 @@ function GLD:MaybeWelcomeGuest(unit, fullName)
 end
 
 function GLD:WelcomeGuestsFromGroup()
-  if not IsInGroup() and not IsInRaid() then
+  if not IsInRaid() then
     return
   end
 
@@ -192,15 +185,8 @@ function GLD:WelcomeGuestsFromGroup()
     end
   end
 
-  if IsInRaid() then
-    for i = 1, GetNumGroupMembers() do
-      visit("raid" .. i)
-    end
-  else
-    for i = 1, GetNumSubgroupMembers() do
-      visit("party" .. i)
-    end
-    visit("player")
+  for i = 1, GetNumGroupMembers() do
+    visit("raid" .. i)
   end
 end
 
@@ -243,11 +229,6 @@ function GLD:RebuildGroupRoster()
     for i = 1, GetNumGroupMembers() do
       addUnit("raid" .. i)
     end
-  elseif IsInGroup() then
-    for i = 1, GetNumSubgroupMembers() do
-      addUnit("party" .. i)
-    end
-    addUnit("player")
   else
     addUnit("player")
   end
@@ -557,11 +538,6 @@ function GLD:UpdateGuestAttendanceFromGroup()
     for i = 1, GetNumGroupMembers() do
       addUnit("raid" .. i)
     end
-  elseif IsInGroup() then
-    for i = 1, GetNumSubgroupMembers() do
-      addUnit("party" .. i)
-    end
-    addUnit("player")
   else
     addUnit("player")
   end
@@ -575,4 +551,160 @@ function GLD:UpdateGuestAttendanceFromGroup()
       end
     end
   end
+end
+
+local function BuildFullName(name, realm)
+  if not name or name == "" then
+    return nil
+  end
+  if realm and realm ~= "" then
+    return name .. "-" .. realm
+  end
+  return name
+end
+
+function GLD:GetLocalRosterEntry(roster)
+  if type(roster) ~= "table" then
+    return nil
+  end
+
+  local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
+  local name, realm = UnitName("player")
+  local fullName = BuildFullName(name, realm)
+
+  if localKey and roster[localKey] then
+    return roster[localKey], localKey
+  end
+  if fullName and roster[fullName] then
+    return roster[fullName], fullName
+  end
+  if name and roster[name] then
+    return roster[name], name
+  end
+
+  for key, entry in pairs(roster) do
+    if type(entry) == "table" then
+      local entryKey = entry.key or entry.playerKey or key
+      if localKey and entryKey == localKey then
+        return entry, entryKey
+      end
+      local entryName = entry.name or entry.fullName or entry.displayName
+      local entryRealm = entry.realm
+      if entryName and not entryRealm and NS.SplitNameRealm then
+        local base, parsedRealm = NS:SplitNameRealm(entryName)
+        if base then
+          entryName = base
+          entryRealm = parsedRealm or entryRealm
+        end
+      end
+      local entryFull = BuildFullName(entryName, entryRealm)
+      if fullName and entryFull and entryFull == fullName then
+        return entry, entryKey
+      end
+      if name and entryName and entryName == name then
+        return entry, entryKey
+      end
+    end
+  end
+
+  return nil
+end
+
+function GLD:BuildMySnapshotFromRoster(roster)
+  local entry = self:GetLocalRosterEntry(roster)
+  if not entry then
+    return nil
+  end
+  return {
+    queuePos = entry.queuePos,
+    savedPos = entry.savedPos or entry.heldPos or entry.holdPos,
+    numAccepted = entry.numAccepted,
+    attendance = entry.attendance,
+    attendanceCount = entry.attendanceCount,
+  }
+end
+
+function GLD:UpdateShadowMyFromRoster(roster)
+  if not self.shadow then
+    return nil
+  end
+  local snapshot = self:BuildMySnapshotFromRoster(roster)
+  if not snapshot then
+    return nil
+  end
+  self.shadow.my = self.shadow.my or {}
+  for key, value in pairs(snapshot) do
+    self.shadow.my[key] = value
+  end
+  return snapshot
+end
+
+function GLD:BuildRollNonce()
+  self._rollNonce = (self._rollNonce or 0) + 1
+  local now = GetServerTime and GetServerTime() or time()
+  return tostring(now) .. "-" .. tostring(math.random(100000, 999999)) .. "-" .. tostring(self._rollNonce)
+end
+
+function GLD:MakeRollKey(rollID, nonce)
+  if rollID == nil then
+    return nil
+  end
+  local suffix = nonce and tostring(nonce) or "legacy"
+  return tostring(rollID) .. "@" .. suffix
+end
+
+function GLD:GetLegacyRollKey(rollID)
+  return self:MakeRollKey(rollID, "legacy")
+end
+
+function GLD:GetRollKeyFromPayload(payload)
+  if not payload then
+    return nil
+  end
+  if payload.rollKey and payload.rollKey ~= "" then
+    return tostring(payload.rollKey)
+  end
+  if payload.rollID ~= nil then
+    return self:GetLegacyRollKey(payload.rollID)
+  end
+  return nil
+end
+
+function GLD:IsRollSessionExpired(session, now, maxAgeSeconds)
+  if not session then
+    return true
+  end
+  local ts = now or (GetServerTime and GetServerTime() or time())
+  if session.locked then
+    return true
+  end
+  if session.rollExpiresAt and session.rollExpiresAt > 0 and session.rollExpiresAt < ts then
+    return true
+  end
+  local maxAge = maxAgeSeconds or 1800
+  if session.createdAt and session.createdAt > 0 and session.createdAt < (ts - maxAge) then
+    return true
+  end
+  return false
+end
+
+function GLD:FindActiveRoll(rollKey, rollID)
+  if not self.activeRolls then
+    return rollKey, nil
+  end
+  if rollKey and self.activeRolls[rollKey] then
+    return rollKey, self.activeRolls[rollKey]
+  end
+  if rollID ~= nil then
+    local legacyKey = self:GetLegacyRollKey(rollID)
+    if self.activeRolls[legacyKey] then
+      return legacyKey, self.activeRolls[legacyKey]
+    end
+    for key, session in pairs(self.activeRolls) do
+      if session and session.rollID == rollID then
+        return key, session
+      end
+    end
+  end
+  return rollKey, nil
 end

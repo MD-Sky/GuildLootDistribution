@@ -170,6 +170,20 @@ function GLD:MoveToQueueBottom(key)
   self:InsertToQueue(key)
 end
 
+function GLD:MoveToQueueMiddle(key)
+  if not key then
+    return
+  end
+  self:RemoveFromQueue(key)
+  self.db.queue = self.db.queue or {}
+  local count = #self.db.queue
+  local pos = math.floor((count + 1) / 2)
+  if pos < 1 then
+    pos = 1
+  end
+  self:InsertToQueue(key, pos)
+end
+
 function GLD:OnAwardedItem(key)
   if not key then
     return false

@@ -131,7 +131,7 @@ local function DebugPendingRow(session, hasLocalVoted, missingNames, displayText
   if not GLD:IsDebugEnabled() then
     return
   end
-  local key = session and (session.rollID or session.key or session.itemLink or session.itemName) or "unknown"
+  local key = session and (session.rollKey or session.rollID or session.key or session.itemLink or session.itemName) or "unknown"
   local missingSummary = ""
   if missingNames and #missingNames > 0 then
     missingSummary = table.concat(missingNames, ", ")
@@ -184,7 +184,7 @@ local function GetSessionByKey(itemKey)
   end
   for _, session in pairs(GLD.activeRolls) do
     if session then
-      local key = session.rollID or session.key or session.itemLink or session.itemName
+      local key = session.rollKey or session.rollID or session.key or session.itemLink or session.itemName
       if key == itemKey then
         return session
       end
@@ -199,7 +199,12 @@ local function BuildVoteEntries(self, sessions)
   state.indexByKey = {}
   local myKey = NS:GetPlayerKeyFromUnit("player")
   for idx, session in ipairs(sessions or {}) do
-    local key = session.rollID or session.key or session.itemLink or (session.itemName and session.itemName .. "_" .. idx) or ("pending_" .. idx)
+    local key = session.rollKey
+      or session.rollID
+      or session.key
+      or session.itemLink
+      or (session.itemName and session.itemName .. "_" .. idx)
+      or ("pending_" .. idx)
     local vote = nil
     if state.demoMode then
       vote = state.demoVotes and state.demoVotes[key]
@@ -878,6 +883,7 @@ function UI:ShowLootWindowDemo()
   state.demoItems = {
     {
       rollID = "demo-loot-a",
+      rollKey = "demo-loot-a@demo",
       itemLink = "item:237728",
       itemName = "Voidglass Kris",
       canNeed = true,
@@ -901,6 +907,7 @@ function UI:ShowLootWindowDemo()
     },
     {
       rollID = "demo-loot-b",
+      rollKey = "demo-loot-b@demo",
       itemLink = "item:244234",
       itemName = "Astral Gladiator's Prestigious Cloak",
       canNeed = true,
@@ -914,7 +921,7 @@ function UI:ShowLootWindowDemo()
       votes = {},
     },
   }
-  state.demoVotes["demo-loot-a"] = "NEED"
+  state.demoVotes["demo-loot-a@demo"] = "NEED"
   state.activeKey = nil
   self:RefreshLootWindow({ forceShow = true, forceDemo = true })
 end
@@ -972,7 +979,7 @@ function UI:ShowDemoWinnerNotice(session)
   end
 
   self.demoWinnerItems = self.demoWinnerItems or {}
-  local id = session.rollID or session.itemLink or session.itemName or tostring(session)
+  local id = session.rollKey or session.rollID or session.itemLink or session.itemName or tostring(session)
   if not self.demoWinnerItems[id] then
     local itemName = GetDisplayedItemText(session)
     local itemLink = session.itemLink

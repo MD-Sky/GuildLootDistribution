@@ -157,17 +157,6 @@ function GLD:OnInspectReady(_, guid)
         break
       end
     end
-  elseif IsInGroup() then
-    for i = 1, GetNumSubgroupMembers() do
-      local u = "party" .. i
-      if UnitGUID(u) == guid then
-        unit = u
-        break
-      end
-    end
-    if not unit and UnitGUID("player") == guid then
-      unit = "player"
-    end
   else
     if UnitGUID("player") == guid then
       unit = "player"
@@ -199,19 +188,12 @@ function GLD:OnInspectReady(_, guid)
 end
 
 function GLD:QueueGroupSpecSync()
-  if not IsInGroup() and not IsInRaid() then
+  if not IsInRaid() then
     self:UpdateSelfSpec()
     return
   end
-  if IsInRaid() then
-    for i = 1, GetNumGroupMembers() do
-      self:QueueInspect("raid" .. i)
-    end
-  else
-    for i = 1, GetNumSubgroupMembers() do
-      self:QueueInspect("party" .. i)
-    end
-    self:QueueInspect("player")
+  for i = 1, GetNumGroupMembers() do
+    self:QueueInspect("raid" .. i)
   end
 end
 

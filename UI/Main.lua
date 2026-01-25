@@ -26,7 +26,9 @@ function GLD:InitUI()
   UI.showGuests = true
   UI.sortKey = "name"
   UI.sortAscending = true
-  UI.guestAnchorsVisible = true
+  UI.guestAnchorsVisible = false
+  UI.sessionStateLabel = nil
+  UI.sessionStateDot = nil
   UI.editRosterEnabled = false
   UI.enableNoteSearch = false
   UI.visibleRows = 18
@@ -169,6 +171,10 @@ function UI:RefreshMain()
 
   if GLD.UpdateRosterStatusText then
     GLD:UpdateRosterStatusText()
+  end
+
+  if GLD.UpdateSessionStateIndicator then
+    GLD:UpdateSessionStateIndicator()
   end
 
   if GLD.UpdateBottomBarPermissions then
@@ -1507,6 +1513,17 @@ function GLD:CreateHeaderArea(frame)
   end
   ui.searchBox = searchBox
 
+  local stateLabel = header:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+  stateLabel:SetPoint("LEFT", searchBox, "RIGHT", 16, 0)
+  stateLabel:SetText("Session State")
+  ui.sessionStateLabel = stateLabel
+
+  local stateDot = header:CreateTexture(nil, "ARTWORK")
+  stateDot:SetSize(12, 12)
+  stateDot:SetPoint("LEFT", stateLabel, "RIGHT", 6, 0)
+  stateDot:SetTexture("Interface\\COMMON\\Indicator-Red")
+  ui.sessionStateDot = stateDot
+
   if ui.enableNoteSearch then
     local noteBox = CreateFrame("EditBox", nil, header, "SearchBoxTemplate")
     noteBox:SetSize(200, 20)
@@ -1678,6 +1695,7 @@ function GLD:CreateBottomBar(frame)
     end)
   end)
   buttons[#buttons].requiresAuthority = false
+  buttons[#buttons].hideWhenNoAuthority = false
   buttons[#buttons + 1] = CreateActionButton("Admin", 70, function()
     RequireAuthorityAccess(function()
       if ui.OpenAdmin then
@@ -1686,6 +1704,7 @@ function GLD:CreateBottomBar(frame)
     end)
   end)
   buttons[#buttons].requiresAuthority = true
+  buttons[#buttons].hideWhenNoAuthority = true
   buttons[#buttons + 1] = CreateActionButton("End Session", 100, function()
     RequireAuthorityAccess(function()
       if self.EndSession then
@@ -1695,6 +1714,7 @@ function GLD:CreateBottomBar(frame)
     end)
   end)
   buttons[#buttons].requiresAuthority = true
+  buttons[#buttons].hideWhenNoAuthority = true
   buttons[#buttons + 1] = CreateActionButton("Start Session", 100, function()
     RequireAuthorityAccess(function()
       if self.StartSession then
@@ -1704,6 +1724,7 @@ function GLD:CreateBottomBar(frame)
     end)
   end)
   buttons[#buttons].requiresAuthority = true
+  buttons[#buttons].hideWhenNoAuthority = true
   buttons[#buttons + 1] = CreateActionButton("Guest Anchors", 110, function()
     RequireAuthorityAccess(function()
       ui.guestAnchorsVisible = not ui.guestAnchorsVisible
@@ -1711,6 +1732,7 @@ function GLD:CreateBottomBar(frame)
     end)
   end)
   buttons[#buttons].requiresAuthority = true
+  buttons[#buttons].hideWhenNoAuthority = true
 
   local previous = nil
   for _, button in ipairs(buttons) do
@@ -1737,7 +1759,7 @@ function GLD:CreateGuestPanel(frame)
 
   local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   title:SetPoint("TOPLEFT", panel, "TOPLEFT", 8, -6)
-  title:SetText("Guest Anchors (Non-guild Party/Raid)")
+  title:SetText("Guest Anchors (Non-guild Raid Members)")
   panel.title = title
 
   local scrollFrame = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
@@ -1782,6 +1804,16 @@ function GLD:UpdateBottomBarPermissions()
   local canAccessAdmin = self.CanAccessAdminUI and self:CanAccessAdminUI() or false
   local canMutate = self.CanMutateState and self:CanMutateState() or false
   for _, button in ipairs(ui.adminButtons) do
+    if button and button.hideWhenNoAuthority then
+      local show = canMutate
+      if button.SetShown then
+        button:SetShown(show)
+      elseif show then
+        button:Show()
+      else
+        button:Hide()
+      end
+    end
     if button and button.SetEnabled then
       local allow = canAccessAdmin
       if button.requiresAuthority then
@@ -1792,6 +1824,12 @@ function GLD:UpdateBottomBarPermissions()
   end
   if ui.toggleGuestsBtn and ui.toggleGuestsBtn.SetEnabled then
     ui.toggleGuestsBtn:SetEnabled(canMutate)
+  end
+  if not canMutate and ui.guestAnchorsVisible then
+    ui.guestAnchorsVisible = false
+    if self.UpdateGuestPanelLayout then
+      self:UpdateGuestPanelLayout()
+    end
   end
   if ui.guestModeLabel then
     if self.IsGuest and self:IsGuest("player") then
@@ -1815,6 +1853,26 @@ function GLD:UpdateRosterStatusText()
     text = self:GetDefaultRosterStatusText()
   end
   ui.statusText:SetText(text or "")
+end
+
+function GLD:UpdateSessionStateIndicator()
+  local ui = self.UI
+  if not ui or not ui.sessionStateDot then
+    return
+  end
+  local isActive = nil
+  if self.IsAuthority and self:IsAuthority() then
+    isActive = self.db and self.db.session and self.db.session.active == true
+  elseif self.shadow and self.shadow.sessionActive ~= nil then
+    isActive = self.shadow.sessionActive == true
+  else
+    isActive = self.db and self.db.session and self.db.session.active == true
+  end
+  if isActive then
+    ui.sessionStateDot:SetTexture("Interface\\COMMON\\Indicator-Green")
+  else
+    ui.sessionStateDot:SetTexture("Interface\\COMMON\\Indicator-Red")
+  end
 end
 
 function GLD:IsRosterEditEnabled()
@@ -1842,17 +1900,10 @@ end
 
 function GLD:GetDefaultRosterStatusText()
   local myPos = "--"
-  local isAuthority = self:IsAuthority()
-  if isAuthority then
-    local key = NS:GetPlayerKeyFromUnit("player")
-    local player = key and self.db and self.db.players and self.db.players[key]
-    if player and player.queuePos then
-      myPos = tostring(player.queuePos)
-    end
-  else
-    if self.shadow and self.shadow.my and self.shadow.my.queuePos then
-      myPos = tostring(self.shadow.my.queuePos)
-    end
+  local roster = self.GetRosterSource and self:GetRosterSource() or (self.db and self.db.players) or nil
+  local entry = self.GetLocalRosterEntry and roster and self:GetLocalRosterEntry(roster) or nil
+  if entry and entry.queuePos then
+    myPos = tostring(entry.queuePos)
   end
   return "My Position: " .. myPos
 end
@@ -1947,13 +1998,23 @@ function GLD:UpdateHeaderSortIndicators()
   end
 end
 
+function GLD:GetRosterSource()
+  if self:IsAuthority() then
+    return (self.db and self.db.players) or {}
+  end
+  if self.CanAccessAdminUI and self:CanAccessAdminUI() then
+    return (self.db and self.db.players) or {}
+  end
+  local roster = self.shadow and self.shadow.roster or nil
+  if type(roster) == "table" and next(roster) ~= nil then
+    return roster
+  end
+  return (self.db and self.db.players) or {}
+end
+
 function GLD:GetRosterMembers()
   -- Integration point: return your current roster list (array or keyed table).
-  local members = nil
-  if self.GetMembers then
-    members = self:GetMembers()
-  end
-  members = members or self.sessionMembers or (self.db and self.db.players) or {}
+  local members = self.GetRosterSource and self:GetRosterSource() or {}
 
   local list = {}
   if type(members) == "table" and #members > 0 then
@@ -2596,10 +2657,6 @@ function GLD:RefreshGuestAnchors()
     for i = 1, GetNumGroupMembers() do
       addUnit("raid" .. i)
     end
-  elseif IsInGroup() then
-    for i = 1, GetNumSubgroupMembers() do
-      addUnit("party" .. i)
-    end
   end
 
   local rowHeight = 22
@@ -2608,7 +2665,7 @@ function GLD:RefreshGuestAnchors()
       panel.emptyLabel = panel.scrollChild:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
       panel.emptyLabel:SetPoint("TOPLEFT", panel.scrollChild, "TOPLEFT", 4, -4)
     end
-    panel.emptyLabel:SetText("No non-guild party/raid members found.")
+    panel.emptyLabel:SetText("No non-guild raid members found.")
     panel.emptyLabel:Show()
     for _, row in ipairs(panel.rows) do
       row:Hide()
@@ -2702,24 +2759,29 @@ function UI:SubmitRollVote(session, vote, advanceTest)
     if authority and not GLD:IsAuthority() then
       GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
         rollID = session.rollID,
+        rollKey = session.rollKey,
         vote = vote,
         voterKey = key,
       }, "WHISPER", authority)
     else
-      local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
-      GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
-        rollID = session.rollID,
-        vote = vote,
-        voterKey = key,
-      }, channel)
+      if IsInRaid() then
+        GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
+          rollID = session.rollID,
+          rollKey = session.rollKey,
+          vote = vote,
+          voterKey = key,
+        }, "RAID")
+      end
     end
   else
-    local channel = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY")
-    GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
-      rollID = session.rollID,
-      vote = vote,
-      voterKey = key,
-    }, channel)
+    if IsInRaid() then
+      GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
+        rollID = session.rollID,
+        rollKey = session.rollKey,
+        vote = vote,
+        voterKey = key,
+      }, "RAID")
+    end
   end
   if GLD.IsDebugEnabled and GLD:IsDebugEnabled() then
     GLD:Debug("Vote sent: rollID=" .. tostring(session.rollID) .. " vote=" .. tostring(vote))
@@ -2729,14 +2791,14 @@ function UI:SubmitRollVote(session, vote, advanceTest)
     GLD:Print("Result locked. Your vote was recorded but the outcome is final.")
   end
 
-  if advanceTest and NS.TestUI and session.testVoterName and not IsInGroup() and not IsInRaid() then
+  if advanceTest and NS.TestUI and session.testVoterName and not IsInRaid() then
     NS.TestUI.testVotes = NS.TestUI.testVotes or {}
     NS.TestUI.testVotes[session.testVoterName] = vote
     NS.TestUI:AdvanceTestVoter()
   end
 
   if self.RefreshLootWindow then
-    local rollKey = session and session.rollID
+    local rollKey = session and (session.rollKey or session.rollID)
     self:RefreshLootWindow({ advance = true, activeKey = rollKey })
   end
 end
@@ -2757,9 +2819,10 @@ function UI:ShowRollPopup(session)
   end
 
   self.rollFrames = self.rollFrames or {}
-  if session.rollID and self.rollFrames[session.rollID] then
-    self.rollFrames[session.rollID]:Release()
-    self.rollFrames[session.rollID] = nil
+  local frameKey = session.rollKey or session.rollID
+  if frameKey and self.rollFrames[frameKey] then
+    self.rollFrames[frameKey]:Release()
+    self.rollFrames[frameKey] = nil
   end
 
   local frame = AceGUI:Create("Frame")
@@ -2786,8 +2849,8 @@ function UI:ShowRollPopup(session)
   end
 
   frame:SetCallback("OnClose", function(widget)
-    if session.rollID and self.rollFrames then
-      self.rollFrames[session.rollID] = nil
+    if frameKey and self.rollFrames then
+      self.rollFrames[frameKey] = nil
     end
     widget:Release()
   end)
@@ -2877,16 +2940,16 @@ function UI:ShowRollPopup(session)
         end
         return
       end
-      if session.rollID and self.rollFrames then
-        self.rollFrames[session.rollID] = nil
+      if frameKey and self.rollFrames then
+        self.rollFrames[frameKey] = nil
       end
       frame:Release()
     end)
     frame:AddChild(button)
   end
 
-  if session.rollID then
-    self.rollFrames[session.rollID] = frame
+  if frameKey then
+    self.rollFrames[frameKey] = frame
   else
     self.rollFrame = frame
   end

@@ -46,6 +46,9 @@ function GLD:StartRaidSession()
   table.insert(self.db.raidSessions, 1, entry)
   self.db.session.raidSessionId = id
   self.db.session.currentBoss = nil
+  if self.UI and self.UI.RefreshHistoryIfOpen then
+    self.UI:RefreshHistoryIfOpen()
+  end
   return entry
 end
 
@@ -86,6 +89,9 @@ function GLD:EndSession()
   end
   self.db.session.raidSessionId = nil
   self.db.session.currentBoss = nil
+  if self.UI and self.UI.RefreshHistoryIfOpen then
+    self.UI:RefreshHistoryIfOpen()
+  end
   self:BroadcastSnapshot()
   self:Print("Session ended")
 end
@@ -116,49 +122,21 @@ function GLD:OnEncounterEnd(_, encounterID, encounterName, difficultyID, groupSi
     encounterName = encounterName,
     killedAt = killedAt,
   }
+  if self.UI and self.UI.RefreshHistoryIfOpen then
+    self.UI:RefreshHistoryIfOpen()
+  end
 end
 
 function GLD:AutoMarkCurrentGroup()
-  if not IsInGroup() then
+  if not IsInRaid() then
     return
   end
   local presentKeys = {}
-  if IsInRaid() then
-    local count = GetNumGroupMembers()
-    for i = 1, count do
-      local unit = "raid" .. i
-      if UnitExists(unit) and UnitIsConnected(unit) then
-        local playerKey = self:UpsertPlayerFromUnit(unit)
-        if playerKey then
-          presentKeys[playerKey] = true
-          if self.db.session.active and not self.db.session.attended[playerKey] then
-            local player = self.db.players[playerKey]
-            player.attendanceCount = (player.attendanceCount or 0) + 1
-            self.db.session.attended[playerKey] = true
-          end
-          self:SetAttendance(playerKey, "PRESENT")
-        end
-      end
-    end
-  else
-    local count = GetNumSubgroupMembers()
-    for i = 1, count do
-      local unit = "party" .. i
-      if UnitExists(unit) and UnitIsConnected(unit) then
-        local playerKey = self:UpsertPlayerFromUnit(unit)
-        if playerKey then
-          presentKeys[playerKey] = true
-          if self.db.session.active and not self.db.session.attended[playerKey] then
-            local player = self.db.players[playerKey]
-            player.attendanceCount = (player.attendanceCount or 0) + 1
-            self.db.session.attended[playerKey] = true
-          end
-          self:SetAttendance(playerKey, "PRESENT")
-        end
-      end
-    end
-    if UnitIsConnected("player") then
-      local playerKey = self:UpsertPlayerFromUnit("player")
+  local count = GetNumGroupMembers()
+  for i = 1, count do
+    local unit = "raid" .. i
+    if UnitExists(unit) and UnitIsConnected(unit) then
+      local playerKey = self:UpsertPlayerFromUnit(unit)
       if playerKey then
         presentKeys[playerKey] = true
         if self.db.session.active and not self.db.session.attended[playerKey] then
