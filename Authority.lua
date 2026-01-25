@@ -2,104 +2,116 @@ local _, NS = ...
 
 local GLD = NS.GLD
 
-function GLD:GetAuthorityName()
-  if not IsInGroup() then
-    return nil
+function GLD:SetSessionAuthority(guid, name)
+  if not self.db or not self.db.session then
+    return
   end
+  if guid and guid ~= "" then
+    self.db.session.authorityGUID = guid
+  else
+    self.db.session.authorityGUID = nil
+  end
+  if name and name ~= "" then
+    self.db.session.authorityName = name
+  else
+    self.db.session.authorityName = nil
+  end
+end
 
-  local function fullName(unit)
-    local name, realm = UnitName(unit)
-    if not name then
+function GLD:ClearSessionAuthority()
+  if not self.db or not self.db.session then
+    return
+  end
+  self.db.session.authorityGUID = nil
+  self.db.session.authorityName = nil
+end
+
+function GLD:GetAuthorityGUID()
+  return self.db and self.db.session and self.db.session.authorityGUID or nil
+end
+
+function GLD:GetAuthorityName()
+  local session = self.db and self.db.session or nil
+  if session and session.authorityName and session.authorityName ~= "" then
+    return session.authorityName
+  end
+  local guid = session and session.authorityGUID or nil
+  if guid and self.db and self.db.players and self.db.players[guid] then
+    local player = self.db.players[guid]
+    local name = player.name
+    local realm = player.realm
+    if name then
+      if realm and realm ~= "" then
+        return name .. "-" .. realm
+      end
+      return name
+    end
+  end
+  if guid then
+    local function tryUnit(unit)
+      if UnitExists(unit) and UnitGUID(unit) == guid then
+        return self:GetUnitFullName(unit)
+      end
       return nil
     end
-    if realm and realm ~= "" then
-      return name .. "-" .. realm
+    local name = tryUnit("player")
+    if name then
+      return name
     end
-    return name
-  end
-
-  local function isGuildMaster(unit)
-    local _, _, rankIndex = GetGuildInfo(unit)
-    return rankIndex == 0
-  end
-
-  local function isOfficer(unit)
-    local _, rankName, rankIndex = GetGuildInfo(unit)
-    if rankIndex == 0 then
-      return true
-    end
-    return rankName and rankName:lower() == "officer"
-  end
-
-  local function isRaidLeaderOrAssistant(unit)
-    return UnitIsGroupLeader(unit) or UnitIsGroupAssistant(unit)
-  end
-
-  local gm = nil
-  if IsInRaid() then
-    for i = 1, GetNumGroupMembers() do
-      local unit = "raid" .. i
-      if UnitExists(unit) and UnitIsConnected(unit) and isGuildMaster(unit) then
-        gm = fullName(unit)
-        break
+    if IsInRaid() then
+      for i = 1, GetNumGroupMembers() do
+        name = tryUnit("raid" .. i)
+        if name then
+          return name
+        end
       end
-    end
-  else
-    if UnitExists("player") and UnitIsConnected("player") and isGuildMaster("player") then
-      gm = fullName("player")
-    end
-    for i = 1, GetNumSubgroupMembers() do
-      local unit = "party" .. i
-      if UnitExists(unit) and UnitIsConnected(unit) and isGuildMaster(unit) then
-        gm = fullName(unit)
-        break
+    elseif IsInGroup() then
+      for i = 1, GetNumSubgroupMembers() do
+        name = tryUnit("party" .. i)
+        if name then
+          return name
+        end
       end
     end
   end
-
-  if gm then
-    return gm
-  end
-
-  local officers = {}
-  local function consider(unit)
-    if UnitExists(unit) and UnitIsConnected(unit) and isOfficer(unit) and isRaidLeaderOrAssistant(unit) then
-      local name = fullName(unit)
-      if name then
-        table.insert(officers, { name = name, leader = UnitIsGroupLeader(unit) })
-      end
-    end
-  end
-
-  if IsInRaid() then
-    for i = 1, GetNumGroupMembers() do
-      consider("raid" .. i)
-    end
-  else
-    consider("player")
-    for i = 1, GetNumSubgroupMembers() do
-      consider("party" .. i)
-    end
-  end
-
-  table.sort(officers, function(a, b)
-    if a.leader ~= b.leader then
-      return a.leader
-    end
-    return a.name < b.name
-  end)
-
-  return officers[1] and officers[1].name or nil
+  return nil
 end
 
 function GLD:IsAuthority()
-  local authority = self:GetAuthorityName()
-  if not authority then
+  local authorityGUID = self:GetAuthorityGUID()
+  if not authorityGUID then
     return false
   end
-  local name, realm = UnitName("player")
-  if realm and realm ~= "" then
-    return authority == name .. "-" .. realm
+  local myGuid = UnitGUID("player")
+  return myGuid and myGuid == authorityGUID
+end
+
+function GLD:IsAuthorizedSender(sender, payloadAuthorityGUID, payloadAuthorityName)
+  local senderGuid = self.GetGuidForSender and self:GetGuidForSender(sender) or nil
+  if payloadAuthorityGUID and senderGuid and payloadAuthorityGUID ~= senderGuid then
+    return false, senderGuid
   end
-  return authority == name
+
+  local authorityGUID = self:GetAuthorityGUID()
+  if (not authorityGUID or authorityGUID == "") and (payloadAuthorityGUID or senderGuid) then
+    local name = payloadAuthorityName or sender
+    self:SetSessionAuthority(payloadAuthorityGUID or senderGuid, name)
+    authorityGUID = self:GetAuthorityGUID()
+  end
+
+  if payloadAuthorityGUID and authorityGUID and authorityGUID ~= payloadAuthorityGUID then
+    return false, senderGuid
+  end
+
+  if not authorityGUID or not senderGuid then
+    return false, senderGuid
+  end
+
+  if payloadAuthorityName and payloadAuthorityName ~= "" and authorityGUID == senderGuid then
+    if self.db and self.db.session and (not self.db.session.authorityName or self.db.session.authorityName == "") then
+      self.db.session.authorityName = payloadAuthorityName
+    end
+  end
+
+  return senderGuid == authorityGUID, senderGuid
 end

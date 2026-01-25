@@ -39,6 +39,191 @@ function NS:GetPlayerKeyFromUnit(unit)
   return name .. "-" .. realm
 end
 
+function GLD:GetUnitFullName(unit)
+  if not unit or not UnitExists(unit) then
+    return nil
+  end
+  local name, realm = UnitName(unit)
+  if not name or name == "" then
+    return nil
+  end
+  if realm and realm ~= "" then
+    return name .. "-" .. realm
+  end
+  return name
+end
+
+function GLD:GetOurGuildName()
+  local name = GetGuildInfo("player")
+  if name and name ~= "" then
+    return name
+  end
+  return nil
+end
+
+function GLD:IsGuest(unitOrMember)
+  local ourGuild = self:GetOurGuildName()
+  if type(unitOrMember) == "table" then
+    if unitOrMember.isGuest ~= nil then
+      return unitOrMember.isGuest
+    end
+    if unitOrMember.source ~= nil then
+      return unitOrMember.source == "guest"
+    end
+    if unitOrMember.member then
+      return self:IsGuest(unitOrMember.member)
+    end
+    if unitOrMember.unit then
+      local guildName = GetGuildInfo(unitOrMember.unit)
+      if not ourGuild then
+        return true
+      end
+      return not guildName or guildName ~= ourGuild
+    end
+    return false
+  end
+
+  if type(unitOrMember) == "string" and UnitExists(unitOrMember) then
+    local guildName = GetGuildInfo(unitOrMember)
+    if not ourGuild then
+      return true
+    end
+    return not guildName or guildName ~= ourGuild
+  end
+
+  return false
+end
+
+function GLD:GetGuidForSender(sender)
+  if not sender or sender == "" then
+    return nil
+  end
+  local base, realm = NS:SplitNameRealm(sender)
+  if not base then
+    return nil
+  end
+  local fullName = (realm and realm ~= "") and (base .. "-" .. realm) or base
+
+  local function matches(unit)
+    if not UnitExists(unit) then
+      return false
+    end
+    local name, unitRealm = UnitName(unit)
+    if not name then
+      return false
+    end
+    local unitFull = (unitRealm and unitRealm ~= "") and (name .. "-" .. unitRealm) or name
+    return unitFull == fullName or name == sender
+  end
+
+  if matches("player") then
+    return UnitGUID("player")
+  end
+
+  if IsInRaid() then
+    for i = 1, GetNumGroupMembers() do
+      local unit = "raid" .. i
+      if matches(unit) then
+        return UnitGUID(unit)
+      end
+    end
+  elseif IsInGroup() then
+    for i = 1, GetNumSubgroupMembers() do
+      local unit = "party" .. i
+      if matches(unit) then
+        return UnitGUID(unit)
+      end
+    end
+  end
+
+  return nil
+end
+
+function GLD:MaybeWelcomeGuest(unit, fullName)
+  if not unit or not UnitExists(unit) or not UnitIsConnected(unit) then
+    return
+  end
+  if UnitIsUnit(unit, "player") then
+    return
+  end
+  if not self:GetOurGuildName() then
+    return
+  end
+  if not self:IsGuest(unit) then
+    return
+  end
+
+  local guid = UnitGUID(unit)
+  if not guid or guid == "" then
+    return
+  end
+  fullName = fullName or self:GetUnitFullName(unit)
+  if not fullName or fullName == "" then
+    return
+  end
+
+  local guestDB = self.guestDB or GLT_DB
+  if not guestDB then
+    return
+  end
+  guestDB.seenGuests = guestDB.seenGuests or {}
+  guestDB.lastGuestWelcomeAt = guestDB.lastGuestWelcomeAt or {}
+
+  local now = time()
+  local last = guestDB.lastGuestWelcomeAt[guid] or 0
+  if not guestDB.seenGuests[guid] or (now - last > 600) then
+    guestDB.seenGuests[guid] = true
+    guestDB.lastGuestWelcomeAt[guid] = now
+    local msg = "Welcome to the Incompetents' Guild raid! Heads up: we're using GuildLootTable for loot this run. Guests have view + request only (loot table editing is restricted)."
+    SendChatMessage(msg, "WHISPER", nil, fullName)
+  end
+end
+
+function GLD:WelcomeGuestsFromGroup()
+  if not IsInGroup() and not IsInRaid() then
+    return
+  end
+
+  local function visit(unit)
+    if not UnitExists(unit) then
+      return
+    end
+    local fullName = self:GetUnitFullName(unit)
+    if fullName then
+      self:MaybeWelcomeGuest(unit, fullName)
+    end
+  end
+
+  if IsInRaid() then
+    for i = 1, GetNumGroupMembers() do
+      visit("raid" .. i)
+    end
+  else
+    for i = 1, GetNumSubgroupMembers() do
+      visit("party" .. i)
+    end
+    visit("player")
+  end
+end
+
+function GLD:CanAccessAdminUI()
+  if self:IsGuest("player") then
+    return false
+  end
+  return self:IsAdmin()
+end
+
+function GLD:CanMutateState()
+  if not self:CanAccessAdminUI() then
+    return false
+  end
+  local authorityGUID = self.GetAuthorityGUID and self:GetAuthorityGUID() or nil
+  if not authorityGUID or authorityGUID == "" then
+    return true
+  end
+  return self:IsAuthority()
+end
+
 local function GetClassColorObject(classFile)
   if not classFile then
     return nil
@@ -177,6 +362,12 @@ function GLD:UpsertPlayerFromUnit(unit)
 end
 
 function GLD:AddGuestFromUnit(unit)
+  if self.CanMutateState and not self:CanMutateState() then
+    if self.Print then
+      self:Print("you do not have Guild Permission to access this panel")
+    end
+    return
+  end
   if not unit or not UnitExists(unit) then
     return
   end

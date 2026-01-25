@@ -48,6 +48,9 @@ function GLD:Debug(msg)
 end
 
 function GLD:IsAdmin()
+  if self.IsGuest and self:IsGuest("player") then
+    return false
+  end
   if UnitIsGroupLeader("player") or UnitIsGroupAssistant("player") then
     return true
   end
@@ -111,7 +114,7 @@ function GLD:RegisterSlashCommands()
 
   SLASH_DISADMIN1 = "/disadmin"
   SlashCmdList["DISADMIN"] = function()
-    if not self:IsAdmin() then
+    if not self.CanMutateState or not self:CanMutateState() then
       self:Print("you do not have Guild Permission to access this panel")
       return
     end
@@ -120,7 +123,7 @@ function GLD:RegisterSlashCommands()
 
   SLASH_GLDTEST1 = "/gldtest"
   SlashCmdList["GLDTEST"] = function()
-    if not self:IsAdmin() then
+    if not self.CanMutateState or not self:CanMutateState() then
       self:Print("you do not have Guild Permission to access this panel")
       return
     end
@@ -129,7 +132,7 @@ function GLD:RegisterSlashCommands()
 
   SLASH_GLDADMINTEST1 = "/gldadmintest"
   SlashCmdList["GLDADMINTEST"] = function()
-    if not self:IsAdmin() then
+    if not self.CanMutateState or not self:CanMutateState() then
       self:Print("you do not have Guild Permission to access this panel")
       return
     end

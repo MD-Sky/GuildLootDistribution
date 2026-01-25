@@ -1612,8 +1612,23 @@ function GLD:CreateBottomBar(frame)
   rowCountText:SetText("")
   ui.rowCountText = rowCountText
 
-  local function RequireAdmin(action)
-    if self:IsAdmin() then
+  local guestModeLabel = bar:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  guestModeLabel:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -10, -8)
+  guestModeLabel:SetText("Guest mode: View + Request only")
+  guestModeLabel:SetTextColor(1, 0.82, 0.1)
+  guestModeLabel:Hide()
+  ui.guestModeLabel = guestModeLabel
+
+  local function RequireAdminAccess(action)
+    if self.CanAccessAdminUI and self:CanAccessAdminUI() then
+      action()
+    else
+      self:Print("you do not have Guild Permission to access this panel")
+    end
+  end
+
+  local function RequireAuthorityAccess(action)
+    if self.CanMutateState and self:CanMutateState() then
       action()
     else
       self:Print("you do not have Guild Permission to access this panel")
@@ -1637,41 +1652,46 @@ function GLD:CreateBottomBar(frame)
 
   local buttons = {}
   buttons[#buttons + 1] = CreateActionButton("History", 80, function()
-    RequireAdmin(function()
+    RequireAdminAccess(function()
       if ui.ToggleHistory then
         ui:ToggleHistory()
       end
     end)
   end)
+  buttons[#buttons].requiresAuthority = false
   buttons[#buttons + 1] = CreateActionButton("Admin", 70, function()
-    RequireAdmin(function()
+    RequireAuthorityAccess(function()
       if ui.OpenAdmin then
         ui:OpenAdmin()
       end
     end)
   end)
+  buttons[#buttons].requiresAuthority = true
   buttons[#buttons + 1] = CreateActionButton("End Session", 100, function()
-    RequireAdmin(function()
+    RequireAuthorityAccess(function()
       if self.EndSession then
         self:EndSession()
       end
       ui:RefreshMain()
     end)
   end)
+  buttons[#buttons].requiresAuthority = true
   buttons[#buttons + 1] = CreateActionButton("Start Session", 100, function()
-    RequireAdmin(function()
+    RequireAuthorityAccess(function()
       if self.StartSession then
         self:StartSession()
       end
       ui:RefreshMain()
     end)
   end)
+  buttons[#buttons].requiresAuthority = true
   buttons[#buttons + 1] = CreateActionButton("Guest Anchors", 110, function()
-    RequireAdmin(function()
+    RequireAuthorityAccess(function()
       ui.guestAnchorsVisible = not ui.guestAnchorsVisible
       ui:RefreshMain()
     end)
   end)
+  buttons[#buttons].requiresAuthority = true
 
   local previous = nil
   for _, button in ipairs(buttons) do
@@ -1740,14 +1760,26 @@ function GLD:UpdateBottomBarPermissions()
   if not ui or not ui.adminButtons then
     return
   end
-  local isAdmin = self:IsAdmin()
+  local canAccessAdmin = self.CanAccessAdminUI and self:CanAccessAdminUI() or false
+  local canMutate = self.CanMutateState and self:CanMutateState() or false
   for _, button in ipairs(ui.adminButtons) do
     if button and button.SetEnabled then
-      button:SetEnabled(isAdmin)
+      local allow = canAccessAdmin
+      if button.requiresAuthority then
+        allow = canMutate
+      end
+      button:SetEnabled(allow)
     end
   end
   if ui.toggleGuestsBtn and ui.toggleGuestsBtn.SetEnabled then
-    ui.toggleGuestsBtn:SetEnabled(isAdmin)
+    ui.toggleGuestsBtn:SetEnabled(canMutate)
+  end
+  if ui.guestModeLabel then
+    if self.IsGuest and self:IsGuest("player") then
+      ui.guestModeLabel:Show()
+    else
+      ui.guestModeLabel:Hide()
+    end
   end
 end
 
@@ -1767,7 +1799,7 @@ function GLD:UpdateRosterStatusText()
 end
 
 function GLD:IsRosterEditEnabled()
-  return self.editRosterEnabled == true and self:IsAdmin()
+  return self.editRosterEnabled == true and self.CanMutateState and self:CanMutateState()
 end
 
 function GLD:SetRosterEditEnabled(enabled)
@@ -1791,8 +1823,8 @@ end
 
 function GLD:GetDefaultRosterStatusText()
   local myPos = "--"
-  local isAdmin = self:IsAdmin()
-  if isAdmin then
+  local isAuthority = self:IsAuthority()
+  if isAuthority then
     local key = NS:GetPlayerKeyFromUnit("player")
     local player = key and self.db and self.db.players and self.db.players[key]
     if player and player.queuePos then
@@ -2515,7 +2547,7 @@ function GLD:RefreshGuestAnchors()
     return
   end
 
-  local isAdmin = self:IsAdmin()
+  local canMutate = self.CanMutateState and self:CanMutateState() or false
   local existingGuests = {}
   for key, player in pairs(self.db and self.db.players or {}) do
     if player and player.source == "guest" then
@@ -2610,10 +2642,10 @@ function GLD:RefreshGuestAnchors()
     end
 
     if row.addButton and row.addButton.SetEnabled then
-      row.addButton:SetEnabled(isAdmin)
+      row.addButton:SetEnabled(canMutate)
     end
     row.addButton:SetScript("OnClick", function()
-      if not self:IsAdmin() then
+      if not self.CanMutateState or not self:CanMutateState() then
         self:Print("you do not have Guild Permission to access this panel")
         return
       end

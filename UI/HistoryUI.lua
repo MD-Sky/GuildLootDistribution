@@ -39,7 +39,7 @@ function UI:ToggleHistory()
   if not AceGUI then
     return
   end
-  if not GLD:IsAdmin() then
+  if not GLD.CanAccessAdminUI or not GLD:CanAccessAdminUI() then
     GLD:Print("you do not have Guild Permission to access this panel")
     return
   end

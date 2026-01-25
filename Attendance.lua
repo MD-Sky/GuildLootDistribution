@@ -53,6 +53,9 @@ function GLD:StartSession()
   if self.db.session.active then
     return
   end
+  if self.SetSessionAuthority then
+    self:SetSessionAuthority(UnitGUID("player"), self:GetUnitFullName("player"))
+  end
   self.db.session.active = true
   self.db.session.startedAt = GetServerTime()
   self.db.session.attended = {}
@@ -68,6 +71,9 @@ function GLD:EndSession()
     return
   end
   self.db.session.active = false
+  if self.ClearSessionAuthority then
+    self:ClearSessionAuthority()
+  end
   local raidSession = self:GetActiveRaidSession()
   if raidSession then
     raidSession.endedAt = GetServerTime()
@@ -164,6 +170,9 @@ function GLD:AutoMarkCurrentGroup()
 end
 
 function GLD:OnGroupRosterUpdate()
+  if self.WelcomeGuestsFromGroup then
+    self:WelcomeGuestsFromGroup()
+  end
   if not self.db.session.active then
     if self.QueueGroupSpecSync then
       self:QueueGroupSpecSync()

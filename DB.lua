@@ -17,6 +17,14 @@ local DEFAULT_CONFIG = {
   },
 }
 
+local function InitGuestDB()
+  if not GLT_DB or type(GLT_DB) ~= "table" then
+    GLT_DB = {}
+  end
+  GLT_DB.seenGuests = GLT_DB.seenGuests or {}
+  GLT_DB.lastGuestWelcomeAt = GLT_DB.lastGuestWelcomeAt or {}
+end
+
 local function InitMasterDB()
   if not GuildLootDB or type(GuildLootDB) ~= "table" then
     GuildLootDB = {}
@@ -39,6 +47,8 @@ local function InitMasterDB()
     attended = {},
     raidSessionId = nil,
     currentBoss = nil,
+    authorityGUID = nil,
+    authorityName = nil,
   }
 end
 
@@ -62,8 +72,10 @@ end
 function GLD:InitDB()
   InitMasterDB()
   InitShadowDB()
+  InitGuestDB()
   self.db = GuildLootDB
   self.shadow = GuildLootShadow
+  self.guestDB = GLT_DB
 end
 
 function GLD:GetConfig()

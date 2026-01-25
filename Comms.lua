@@ -137,6 +137,13 @@ function GLD:HandleStateSnapshot(sender, payload)
   if not payload then
     return
   end
+  if self.IsAuthorizedSender then
+    local ok = self:IsAuthorizedSender(sender, payload.authorityGUID, payload.authorityName)
+    if not ok then
+      self:Debug("Blocked unauthorized edit from " .. tostring(sender))
+      return
+    end
+  end
   local localRosterHash = self:ComputeRosterHashFromDB()
   local localConfigHash = self:ComputeConfigHash()
   if payload.rosterHash and localRosterHash and payload.rosterHash ~= localRosterHash then
@@ -160,6 +167,13 @@ end
 function GLD:HandleDelta(sender, payload)
   if not payload then
     return
+  end
+  if self.IsAuthorizedSender then
+    local ok = self:IsAuthorizedSender(sender, payload.authorityGUID, payload.authorityName)
+    if not ok then
+      self:Debug("Blocked unauthorized edit from " .. tostring(sender))
+      return
+    end
   end
   if payload.my then
     self.shadow.my = payload.my
@@ -188,6 +202,8 @@ function GLD:BuildSnapshot()
       roster = {},
       rosterHash = nil,
       configHash = self:ComputeConfigHash(),
+      authorityGUID = self:GetAuthorityGUID(),
+      authorityName = self:GetAuthorityName(),
     }
   end
 
@@ -234,6 +250,8 @@ function GLD:BuildSnapshot()
     roster = roster,
     rosterHash = rosterHash,
     configHash = configHash,
+    authorityGUID = self:GetAuthorityGUID(),
+    authorityName = self:GetAuthorityName(),
   }
 end
 
@@ -313,10 +331,17 @@ function GLD:HandleRollVote(sender, payload)
     return
   end
 
-  local authority = self:GetAuthorityName()
   local isAuthority = self:IsAuthority()
-  if not isAuthority and sender ~= authority then
-    return
+  if not isAuthority then
+    if not payload.broadcast then
+      return
+    end
+    if self.IsAuthorizedSender then
+      local ok = self:IsAuthorizedSender(sender)
+      if not ok then
+        return
+      end
+    end
   end
 
   if isAuthority and payload.broadcast then
@@ -359,6 +384,13 @@ function GLD:HandleRollResult(sender, payload)
   if not payload or not payload.rollID then
     return
   end
+  if self.IsAuthorizedSender then
+    local ok = self:IsAuthorizedSender(sender)
+    if not ok then
+      self:Debug("Blocked unauthorized edit from " .. tostring(sender))
+      return
+    end
+  end
   local rollID = payload.rollID
   if self.activeRolls and self.activeRolls[rollID] then
     self.activeRolls[rollID].locked = true
@@ -377,6 +409,13 @@ end
 function GLD:HandleRollMismatch(sender, payload)
   if not payload then
     return
+  end
+  if self.IsAuthorizedSender then
+    local ok = self:IsAuthorizedSender(sender)
+    if not ok then
+      self:Debug("Blocked unauthorized edit from " .. tostring(sender))
+      return
+    end
   end
   self:Print("GLD mismatch: " .. tostring(payload.name) .. " declared " .. tostring(payload.expected) .. " but rolled " .. tostring(payload.actual))
 end

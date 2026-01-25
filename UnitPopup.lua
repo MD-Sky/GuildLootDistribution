@@ -39,7 +39,7 @@ local function EnsureUnitPopupEntry()
     text = "Add as GLD Guest",
     dist = 0,
     func = function(self)
-      if not GLD or not GLD.IsAdmin or not GLD:IsAdmin() then
+      if not GLD or not GLD.CanMutateState or not GLD:CanMutateState() then
         return
       end
       local unit = GetUnitFromPopup(self)
@@ -86,7 +86,7 @@ local function EnsureMenuAPIEntry()
   end
 
   Menu.ModifyMenu("UNIT_POPUP", function(_, rootDescription, contextData)
-    if not GLD or not GLD.IsAdmin or not GLD:IsAdmin() then
+    if not GLD or not GLD.CanMutateState or not GLD:CanMutateState() then
       return
     end
     local unit = contextData and contextData.unit

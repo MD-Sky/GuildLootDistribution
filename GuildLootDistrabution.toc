@@ -1,9 +1,9 @@
-## Interface: 11508,120001
+## Interface: 120000, 11508,120001
 ## Title: GuildLootDistrabution
 ## Notes: Guild loot queue and distribution manager
 ## Author: GuildLoot
 ## Version: 0.2.1
-## SavedVariables: GuildLootDB, GuildLootTestDB
+## SavedVariables: GuildLootDB, GuildLootTestDB, GLT_DB
 ## SavedVariablesPerCharacter: GuildLootShadow
 ## OptionalDeps: Ace3
 
