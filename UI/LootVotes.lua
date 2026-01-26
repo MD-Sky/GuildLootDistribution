@@ -249,6 +249,39 @@ local function HasLocalPlayerVotedSession(session, votes)
   return votes[localKey] ~= nil
 end
 
+local function HasUnvotedEntries(state, entries)
+  if state and state.demoMode then
+    return false
+  end
+  for _, entry in ipairs(entries or {}) do
+    if entry and not entry.vote then
+      return true
+    end
+  end
+  return false
+end
+
+local function HasBlockingVotes(self)
+  local state = GetLootWindowState(self)
+  if state and state.demoMode then
+    return false
+  end
+  local localKey = NS:GetPlayerKeyFromUnit("player")
+  if not localKey then
+    return false
+  end
+  local sessions = GetActiveVoteSessions()
+  for _, session in ipairs(sessions) do
+    if session and not session.locked then
+      local votes = session.votes or {}
+      if votes[localKey] == nil then
+        return true
+      end
+    end
+  end
+  return false
+end
+
 local function GetMissingVotersForSession(session, votes)
   local missing = {}
   if not session then
@@ -391,8 +424,8 @@ local function CreatePendingRow(self, window)
   row.itemText:SetJustifyH("LEFT")
 
   row.statusText = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  row.statusText:SetPoint("TOPLEFT", row.itemText, "TOPRIGHT", 8, -4)
   row.statusText:SetPoint("TOPRIGHT", row, "TOPRIGHT", -10, -4)
-  row.statusText:SetPoint("LEFT", row.itemText, "RIGHT", 8, 0)
   row.statusText:SetJustifyH("LEFT")
   row.statusText:SetJustifyV("TOP")
   row.statusText:SetWordWrap(true)
@@ -407,7 +440,10 @@ local function CreatePendingRow(self, window)
     local uiY = cursorY / scale
     local offset = TOOLTIP_CURSOR_OFFSET
     local parentWidth = UIParent and UIParent.GetWidth and UIParent:GetWidth() or 0
-    local tooltipWidth = GameTooltip:GetWidth() or 220
+    local tooltipWidth = GameTooltip and GameTooltip.GetWidth and GameTooltip:GetWidth() or nil
+    if type(tooltipWidth) ~= "number" or tooltipWidth <= 0 then
+      tooltipWidth = 220
+    end
     local point = "BOTTOMLEFT"
     local anchorX = uiX + offset
     if parentWidth > 0 and anchorX + tooltipWidth > parentWidth then
@@ -502,11 +538,32 @@ local function EnsureLootWindow(self)
   local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
   closeButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -8)
   closeButton:SetScript("OnClick", function()
+    if HasBlockingVotes(self) then
+      if GLD and GLD.Print then
+        GLD:Print("You must vote or pass before closing.")
+      end
+      if frame.Raise then
+        frame:Raise()
+      end
+      return
+    end
     frame:Hide()
   end)
   frame:SetScript("OnHide", function()
     local state = GetLootWindowState(self)
     state.demoMode = false
+    if HasBlockingVotes(self) then
+      if C_Timer and C_Timer.After then
+        C_Timer.After(0.1, function()
+          if frame and not frame:IsShown() then
+            frame:Show()
+            if frame.Raise then
+              frame:Raise()
+            end
+          end
+        end)
+      end
+    end
   end)
 
   local activePanel = CreateFrame("Frame", nil, frame, "InsetFrameTemplate3")
@@ -643,6 +700,7 @@ local function EnsureLootWindow(self)
   pendingEmpty:Hide()
 
   window.frame = frame
+  window.closeButton = closeButton
   window.activeIcon = activeIcon
   window.activeItemLabel = activeItemLabel
   window.activeStatusLabel = statusLabel
@@ -650,6 +708,7 @@ local function EnsureLootWindow(self)
   window.adminOverrideButton = adminOverrideButton
   window.forcePendingButton = forcePendingButton
   window.voteButtons = voteButtons
+  window.pendingPanel = pendingPanel
   window.pendingScroll = pendingScroll
   window.pendingScrollChild = pendingScrollChild
   window.pendingRows = {}
@@ -741,9 +800,29 @@ local function UpdatePendingRows(self, state, window)
   local rows = window.pendingRows
   local yOffset = 0
   local spacing = ROW_SPACING
-  local scrollWidth = 1
+  local scrollWidth = 0
   if window.pendingScroll and window.pendingScroll.GetWidth then
-    scrollWidth = window.pendingScroll:GetWidth()
+    scrollWidth = window.pendingScroll:GetWidth() or 0
+  end
+  if scrollWidth <= 1 then
+    local fallbackWidth = window.pendingPanel and window.pendingPanel.GetWidth and window.pendingPanel:GetWidth() or 0
+    if fallbackWidth <= 1 and window.frame and window.frame.GetWidth then
+      fallbackWidth = window.frame:GetWidth() or 0
+    end
+    if fallbackWidth > 1 then
+      scrollWidth = math.max(fallbackWidth - 34, 1)
+    else
+      scrollWidth = 1
+    end
+    if not state.pendingWidthRetry and C_Timer and C_Timer.After then
+      state.pendingWidthRetry = true
+      C_Timer.After(0, function()
+        state.pendingWidthRetry = false
+        if UI and UI.RefreshLootWindow then
+          UI:RefreshLootWindow()
+        end
+      end)
+    end
   end
   local childWidth = math.max(scrollWidth, 1)
   window.pendingScrollChild:SetWidth(childWidth)
@@ -880,27 +959,60 @@ function UI:RefreshLootWindow(options)
   BuildVoteEntries(self, displaySessions)
   UpdateActiveSelection(self, state, options)
   local sessionActive = nil
+  local sessionSource = "unknown"
   if GLD.IsAuthority and GLD:IsAuthority() then
     sessionActive = GLD.db and GLD.db.session and GLD.db.session.active
+    sessionSource = "authority-db"
   elseif GLD.shadow and GLD.shadow.sessionActive ~= nil then
     sessionActive = GLD.shadow.sessionActive
+    sessionSource = "shadow"
   else
     sessionActive = GLD.db and GLD.db.session and GLD.db.session.active
+    sessionSource = "db"
   end
   local inRaid = IsInRaid()
   local shouldShow = options.forceShow
     or state.demoMode
-    or (sessionActive and inRaid and #sessions > 0)
+    or (inRaid and #sessions > 0)
   local window = EnsureLootWindow(self)
+  local blockClose = HasUnvotedEntries(state, state.currentVoteItems)
+  if window.closeButton and window.closeButton.SetEnabled then
+    window.closeButton:SetEnabled(not blockClose)
+  end
+  if GLD.IsDebugEnabled and GLD:IsDebugEnabled() then
+    GLD:Debug(
+      "Loot window refresh: sessions="
+        .. tostring(#sessions)
+        .. " shouldShow="
+        .. tostring(shouldShow)
+        .. " inRaid="
+        .. tostring(inRaid)
+        .. " sessionActive="
+        .. tostring(sessionActive)
+        .. " source="
+        .. tostring(sessionSource)
+        .. " blockClose="
+        .. tostring(blockClose)
+    )
+  end
   if shouldShow and #state.currentVoteItems == 0 then
     state.activeKey = nil
     state.activeIndex = nil
   end
   if shouldShow then
     window.frame:Show()
+    if window.frame.Raise and (options.forceShow or options.reopen) then
+      window.frame:Raise()
+    end
     UpdateLootWindowContent(self, state, window)
+    if GLD.IsDebugEnabled and GLD:IsDebugEnabled() then
+      GLD:Debug("Loot window shown: items=" .. tostring(#state.currentVoteItems))
+    end
   else
     window.frame:Hide()
+    if GLD.IsDebugEnabled and GLD:IsDebugEnabled() then
+      GLD:Debug("Loot window hidden.")
+    end
   end
 end
 

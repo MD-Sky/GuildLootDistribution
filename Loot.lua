@@ -42,6 +42,93 @@ local function CountActiveRolls(activeRolls)
   return count
 end
 
+local function IsPlayerGuidKey(key)
+  return type(key) == "string" and key:find("^Player%-") ~= nil
+end
+
+function GLD:GetWhisperTargetForPlayerKey(key)
+  if not key then
+    return nil
+  end
+  if IsPlayerGuidKey(key) then
+    if IsInRaid() then
+      for i = 1, GetNumGroupMembers() do
+        local unit = "raid" .. i
+        if UnitExists(unit) and UnitGUID(unit) == key then
+          return self:GetUnitFullName(unit) or UnitName(unit)
+        end
+      end
+    end
+    local name = LiveProvider and LiveProvider.GetPlayerName and LiveProvider:GetPlayerName(key) or nil
+    if name and name ~= key then
+      return name
+    end
+    return nil
+  end
+  return key
+end
+
+function GLD:GetRaidWhisperTargets()
+  local targets = {}
+  local seen = {}
+  if not IsInRaid() then
+    return targets
+  end
+  for i = 1, GetNumGroupMembers() do
+    local unit = "raid" .. i
+    if UnitExists(unit) then
+      local name = self:GetUnitFullName(unit) or UnitName(unit)
+      if name and not seen[name] then
+        targets[#targets + 1] = name
+        seen[name] = true
+      end
+    end
+  end
+  return targets
+end
+
+function GLD:GetMissingAckTargetsForSession(session)
+  if not session then
+    return {}
+  end
+  local targets = {}
+  local seen = {}
+  local expected = session.expectedVoters or {}
+  local acks = session.acks or {}
+  if #expected == 0 then
+    return self:GetRaidWhisperTargets()
+  end
+  for _, key in ipairs(expected) do
+    if key and not acks[key] then
+      local name = self:GetWhisperTargetForPlayerKey(key)
+      if name and not seen[name] then
+        targets[#targets + 1] = name
+        seen[name] = true
+      end
+    end
+  end
+  if #targets == 0 then
+    return self:GetRaidWhisperTargets()
+  end
+  return targets
+end
+
+function GLD:GetMissingAckTargetsForActiveRolls()
+  local targets = {}
+  local seen = {}
+  for _, session in pairs(self.activeRolls or {}) do
+    if session and not session.locked and not session.isTest then
+      for _, name in ipairs(self:GetMissingAckTargetsForSession(session)) do
+        if name and not seen[name] then
+          targets[#targets + 1] = name
+          seen[name] = true
+        end
+      end
+    end
+  end
+  return targets
+end
+
 function GLD:BuildRollSessionPayload(session, options)
   if not session then
     return nil
@@ -97,6 +184,13 @@ function GLD:BroadcastRollSession(session, options, target)
   if not session or session.isTest then
     return
   end
+  if self:IsAuthority() then
+    session.acks = session.acks or {}
+    local myKey = NS:GetPlayerKeyFromUnit("player")
+    if myKey then
+      session.acks[myKey] = true
+    end
+  end
   local payload = self:BuildRollSessionPayload(session, options)
   if not payload then
     return
@@ -109,9 +203,58 @@ function GLD:BroadcastRollSession(session, options, target)
     return
   end
   self:SendCommMessageSafe(NS.MSG.ROLL_SESSION, payload, "RAID")
+  if self:IsAuthority() and self.ScheduleRollSessionResend then
+    self:ScheduleRollSessionResend(session)
+  end
 end
 
-function GLD:BroadcastActiveRollsSnapshot(targets)
+function GLD:ScheduleRollSessionResend(session)
+  if not session or session.isTest then
+    return
+  end
+  if not self:IsAuthority() or not IsInRaid() then
+    return
+  end
+  if session.resendScheduled then
+    return
+  end
+  session.resendScheduled = true
+
+  local function checkAndResend()
+    if not self:IsAuthority() or not IsInRaid() then
+      return
+    end
+    if not session or session.locked then
+      return
+    end
+    local active = self.activeRolls and session.rollKey and self.activeRolls[session.rollKey] or nil
+    if active ~= session then
+      return
+    end
+    local targets = self:GetMissingAckTargetsForSession(session)
+    if #targets == 0 then
+      return
+    end
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug(
+        "Roll resend check: rollID="
+          .. tostring(session.rollID)
+          .. " rollKey="
+          .. tostring(session.rollKey)
+          .. " missing="
+          .. tostring(#targets)
+      )
+    end
+    for _, target in ipairs(targets) do
+      self:BroadcastRollSession(session, { snapshot = true, reopen = true }, target)
+    end
+  end
+
+  C_Timer.After(1, checkAndResend)
+  C_Timer.After(3, checkAndResend)
+end
+
+function GLD:BroadcastActiveRollsSnapshot(targets, options)
   if not self:IsAuthority() then
     return
   end
@@ -124,14 +267,15 @@ function GLD:BroadcastActiveRollsSnapshot(targets)
   if not self.activeRolls then
     return
   end
+  local snapshotOptions = options or {}
   for _, session in pairs(self.activeRolls) do
     if session and not session.locked and not session.isTest then
       if targets and #targets > 0 then
         for _, target in ipairs(targets) do
-          self:BroadcastRollSession(session, { snapshot = true }, target)
+          self:BroadcastRollSession(session, { snapshot = true, reopen = snapshotOptions.reopen }, target)
         end
       else
-        self:BroadcastRollSession(session, { snapshot = true })
+        self:BroadcastRollSession(session, { snapshot = true, reopen = snapshotOptions.reopen })
       end
     end
   end
@@ -145,7 +289,15 @@ function GLD:ForcePendingVotesWindow()
     return false
   end
   if self.BroadcastActiveRollsSnapshot then
-    self:BroadcastActiveRollsSnapshot()
+    local targets = self:GetMissingAckTargetsForActiveRolls()
+    if #targets == 0 then
+      targets = self:GetRaidWhisperTargets()
+    end
+    if #targets > 0 then
+      self:BroadcastActiveRollsSnapshot(targets, { reopen = true })
+    else
+      self:BroadcastActiveRollsSnapshot()
+    end
   end
   local payload = {
     authorityGUID = self:GetAuthorityGUID(),
@@ -249,8 +401,21 @@ function GLD:GetRollCandidateKey(sender)
   if not sender then
     return nil
   end
+  if type(sender) == "string" and sender:find("^Player%-") then
+    return sender
+  end
   local name, realm = NS:SplitNameRealm(sender)
-  return self:FindPlayerKeyByName(name, realm) or sender
+  local key = self:FindPlayerKeyByName(name, realm)
+  if key then
+    return key
+  end
+  if self.GetGuidForSender then
+    local guid = self:GetGuidForSender(sender)
+    if guid then
+      return guid
+    end
+  end
+  return sender
 end
 
 function GLD:AnnounceRollResult(result)
@@ -403,6 +568,20 @@ function GLD:FinalizeRoll(session)
     return
   end
   local winnerKey = self:ResolveRollWinner(session)
+  if self:IsDebugEnabled() then
+    local totalVotes = CountVotes(session.votes)
+    local expectedCount = session.expectedVoters and #session.expectedVoters or 0
+    self:Debug(
+      "Finalize roll: rollID="
+        .. tostring(session.rollID)
+        .. " votes="
+        .. tostring(totalVotes)
+        .. "/"
+        .. tostring(expectedCount)
+        .. " winnerKey="
+        .. tostring(winnerKey)
+    )
+  end
   local provider = session.isTest and TestProvider or LiveProvider
   if LootEngine and LootEngine.CommitAward then
     LootEngine:CommitAward(winnerKey, session, provider)
@@ -418,6 +597,20 @@ function GLD:FinalizeRoll(session)
 
   local resolvedAt = GetServerTime()
   local voteSnapshot, voteCounts = SnapshotVotes(session.votes, provider)
+  if self:IsDebugEnabled() then
+    self:Debug(
+      "Finalize roll votes: rollID="
+        .. tostring(session.rollID)
+        .. " NEED="
+        .. tostring(voteCounts and voteCounts.NEED)
+        .. " GREED="
+        .. tostring(voteCounts and voteCounts.GREED)
+        .. " TRANSMOG="
+        .. tostring(voteCounts and voteCounts.TRANSMOG)
+        .. " PASS="
+        .. tostring(voteCounts and voteCounts.PASS)
+    )
+  end
   local missingAtLock = BuildMissingAtLock(session.expectedVoters, voteSnapshot, provider)
   local startedAt = session.createdAt or resolvedAt
   local resolvedBy = session.resolvedBy or "NORMAL"

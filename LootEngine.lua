@@ -196,10 +196,12 @@ function LootEngine:ResolveWinner(votes, provider, rules, itemContext)
         end
       end
       if winnerKey then
+        DebugLog("ResolveWinner selected: " .. tostring(getName(winnerKey) or winnerKey) .. " via " .. tostring(voteType))
         return winnerKey
       end
     end
   end
+  DebugLog("ResolveWinner selected: none")
   return nil
 end
 

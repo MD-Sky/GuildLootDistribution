@@ -34,6 +34,28 @@ local function StableStringify(value, depth)
   return tostring(value)
 end
 
+local function DeriveRollKey(self, payload)
+  if not payload then
+    return nil
+  end
+  if payload.rollKey and payload.rollKey ~= "" then
+    return tostring(payload.rollKey)
+  end
+  if self.GetRollKeyFromPayload then
+    local key = self:GetRollKeyFromPayload(payload)
+    if key and key ~= "" then
+      return tostring(key)
+    end
+  end
+  if payload.rollID ~= nil then
+    if self.GetLegacyRollKey then
+      return self:GetLegacyRollKey(payload.rollID)
+    end
+    return tostring(payload.rollID) .. "@legacy"
+  end
+  return nil
+end
+
 function GLD:ComputeRosterHashFromSnapshot(roster)
   if not roster then
     return nil
@@ -109,6 +131,12 @@ function GLD:InitComms()
   end
   self.commHandlers[NS.MSG.ROLL_RESULT] = function(sender, payload)
     self:HandleRollResult(sender, payload)
+  end
+  self.commHandlers[NS.MSG.ROLL_ACK] = function(sender, payload)
+    self:HandleRollAck(sender, payload)
+  end
+  self.commHandlers[NS.MSG.ROLL_SESSION_REQUEST] = function(sender, payload)
+    self:HandleRollSessionRequest(sender, payload)
   end
   self.commHandlers[NS.MSG.ROLL_MISMATCH] = function(sender, payload)
     self:HandleRollMismatch(sender, payload)
@@ -353,6 +381,36 @@ function GLD:SendRevisionCheck()
   end
 end
 
+function GLD:RequestRollSessionSnapshot(rollKey, rollID)
+  if self:IsAuthority() then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  local payload = {
+    rollID = rollID,
+    rollKey = rollKey,
+    requestedAt = GetServerTime(),
+  }
+  local authority = self:GetAuthorityName()
+  if authority and authority ~= "" then
+    self:SendCommMessageSafe(NS.MSG.ROLL_SESSION_REQUEST, payload, "WHISPER", authority)
+  else
+    self:SendCommMessageSafe(NS.MSG.ROLL_SESSION_REQUEST, payload, "RAID")
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug(
+      "Roll snapshot requested: rollID="
+        .. tostring(rollID)
+        .. " rollKey="
+        .. tostring(rollKey)
+        .. " authority="
+        .. tostring(authority or "raid")
+    )
+  end
+end
+
 function GLD:RequestAdminAction(action)
   if not action or action == "" then
     return false
@@ -455,26 +513,53 @@ function GLD:HandleAdminRequest(sender, payload)
 end
 
 function GLD:HandleRollSession(sender, payload)
-  if not payload or not payload.rollID then
+  local debugEnabled = self.IsDebugEnabled and self:IsDebugEnabled()
+  if debugEnabled then
+    self:Debug(
+      "Roll session received: sender="
+        .. tostring(sender)
+        .. " rollID="
+        .. tostring(payload and payload.rollID)
+        .. " rollKey="
+        .. tostring(payload and payload.rollKey)
+        .. " item="
+        .. tostring(payload and (payload.itemLink or payload.itemName))
+        .. " snapshot="
+        .. tostring(payload and payload.snapshot == true)
+        .. " reopen="
+        .. tostring(payload and payload.reopen == true)
+    )
+  end
+  if not payload or payload.rollID == nil then
+    if debugEnabled then
+      self:Debug("Roll session ignored: missing payload or rollID.")
+    end
     return
   end
 
   local isTest = payload.test == true
   if not isTest then
     local sessionActive = nil
+    local sessionSource = "unknown"
     if self.shadow and self.shadow.sessionActive ~= nil then
       sessionActive = self.shadow.sessionActive == true
+      sessionSource = "shadow"
     elseif self:IsAuthority() then
       sessionActive = self.db and self.db.session and self.db.session.active == true
+      sessionSource = "authority-db"
     end
     if sessionActive == nil then
       sessionActive = true
+      sessionSource = "default"
     end
-    if not sessionActive or not IsInRaid() then
-      if self.IsDebugEnabled and self:IsDebugEnabled() then
-        self:Debug("Ignoring roll session (not in active raid session).")
+    if not IsInRaid() then
+      if debugEnabled then
+        self:Debug("Roll session ignored: not in raid.")
       end
       return
+    end
+    if sessionActive == false and debugEnabled then
+      self:Debug("Roll session received while sessionActive=false (source=" .. tostring(sessionSource) .. ").")
     end
     if self.IsAuthorizedSender then
       local ok = self:IsAuthorizedSender(sender, payload.authorityGUID, payload.authorityName)
@@ -486,8 +571,11 @@ function GLD:HandleRollSession(sender, payload)
   end
 
   local rollID = payload.rollID
-  local rollKey = self.GetRollKeyFromPayload and self:GetRollKeyFromPayload(payload) or nil
+  local rollKey = DeriveRollKey(self, payload)
   if not rollKey then
+    if debugEnabled then
+      self:Debug("Roll session ignored: unable to derive rollKey for rollID=" .. tostring(rollID))
+    end
     return
   end
 
@@ -497,12 +585,15 @@ function GLD:HandleRollSession(sender, payload)
   end
 
   local session = self.activeRolls[rollKey]
+  local created = false
+  local rekeyed = false
   if not session and payload.rollKey and self.GetLegacyRollKey then
     local legacyKey = self:GetLegacyRollKey(rollID)
     session = self.activeRolls[legacyKey]
     if session then
       self.activeRolls[legacyKey] = nil
       self.activeRolls[rollKey] = session
+      rekeyed = true
     end
   end
   if session and self.IsRollSessionExpired and self:IsRollSessionExpired(session, nil, 1800) then
@@ -516,6 +607,7 @@ function GLD:HandleRollSession(sender, payload)
       votes = {},
     }
     self.activeRolls[rollKey] = session
+    created = true
   end
   session.rollID = rollID or session.rollID
   session.rollKey = rollKey
@@ -555,6 +647,19 @@ function GLD:HandleRollSession(sender, payload)
     for k, v in pairs(payload.votes) do
       session.votes[k] = v
     end
+  end
+
+  if debugEnabled then
+    self:Debug(
+      "Roll session state: rollID="
+        .. tostring(rollID)
+        .. " rollKey="
+        .. tostring(rollKey)
+        .. " created="
+        .. tostring(created)
+        .. " rekeyed="
+        .. tostring(rekeyed)
+    )
   end
 
   if isTest then
@@ -601,10 +706,39 @@ function GLD:HandleRollSession(sender, payload)
     end)
   end
 
+  if not isTest and IsInRaid() and not session.localAcked then
+    local playerKey = NS:GetPlayerKeyFromUnit("player")
+    if playerKey then
+      session.localAcked = true
+      self:SendCommMessageSafe(NS.MSG.ROLL_ACK, {
+        rollID = rollID,
+        rollKey = rollKey,
+        voterKey = playerKey,
+      }, "RAID")
+      if debugEnabled then
+        self:Debug("Roll ack sent: rollID=" .. tostring(rollID) .. " rollKey=" .. tostring(rollKey))
+      end
+    elseif debugEnabled then
+      self:Debug("Roll ack skipped: missing local playerKey.")
+    end
+  end
+
   if self.UI and self.UI.RefreshLootWindow then
-    self.UI:RefreshLootWindow({ forceShow = true })
+    local options = { forceShow = true }
+    if payload.reopen == true then
+      options.reopen = true
+    end
+    self.UI:RefreshLootWindow(options)
+    if debugEnabled then
+      self:Debug("Loot window refresh: forceShow=true reopen=" .. tostring(payload.reopen == true))
+    end
   elseif self.UI and self.UI.ShowPendingFrame then
     self.UI:ShowPendingFrame()
+    if debugEnabled then
+      self:Debug("Pending frame shown (RefreshLootWindow unavailable).")
+    end
+  elseif debugEnabled then
+    self:Debug("No UI available to show loot window.")
   end
 end
 
@@ -613,6 +747,7 @@ function GLD:HandleRollVote(sender, payload)
     return
   end
 
+  local debugEnabled = self.IsDebugEnabled and self:IsDebugEnabled()
   local isAuthority = self:IsAuthority()
   if not isAuthority then
     if not payload.broadcast then
@@ -631,7 +766,7 @@ function GLD:HandleRollVote(sender, payload)
   end
 
   local rollID = payload.rollID
-  local rollKey = self.GetRollKeyFromPayload and self:GetRollKeyFromPayload(payload) or nil
+  local rollKey = DeriveRollKey(self, payload)
   local session = nil
   if self.FindActiveRoll then
     _, session = self:FindActiveRoll(rollKey, rollID)
@@ -639,18 +774,56 @@ function GLD:HandleRollVote(sender, payload)
   if not session then
     session = self.activeRolls and rollKey and self.activeRolls[rollKey] or nil
   end
-  if not session or session.locked then
+  if not session then
+    if debugEnabled then
+      self:Debug(
+        "Vote received for missing roll session: rollID="
+          .. tostring(rollID)
+          .. " rollKey="
+          .. tostring(rollKey)
+          .. " sender="
+          .. tostring(sender)
+      )
+    end
+    if self.RequestRollSessionSnapshot then
+      self:RequestRollSessionSnapshot(rollKey, rollID)
+    end
+    return
+  end
+  if session.locked then
+    if debugEnabled then
+      self:Debug("Vote ignored (session locked): rollID=" .. tostring(rollID) .. " rollKey=" .. tostring(rollKey))
+    end
     return
   end
 
-  local key = payload.voterKey or payload.voterName or self:GetRollCandidateKey(sender)
+  local key = payload.voterKey
+  if key and self.GetRollCandidateKey then
+    key = self:GetRollCandidateKey(key) or key
+  end
+  if not key and payload.voterName then
+    key = self:GetRollCandidateKey(payload.voterName)
+  end
+  if not key and sender then
+    key = self:GetRollCandidateKey(sender)
+  end
   if not key then
+    if debugEnabled then
+      self:Debug(
+        "Vote ignored: missing voter key for rollID="
+          .. tostring(rollID)
+          .. " rollKey="
+          .. tostring(rollKey)
+          .. " sender="
+          .. tostring(sender)
+      )
+    end
     return
   end
 
   session.votes = session.votes or {}
   session.votes[key] = payload.vote
-  if self.IsDebugEnabled and self:IsDebugEnabled() then
+  if debugEnabled then
     self:Debug(
       "Vote received: rollID="
         .. tostring(rollID)
@@ -687,6 +860,7 @@ function GLD:HandleRollResult(sender, payload)
   if not payload then
     return
   end
+  local debugEnabled = self.IsDebugEnabled and self:IsDebugEnabled()
   if self.IsAuthorizedSender then
     local ok = self:IsAuthorizedSender(sender, payload.authorityGUID, payload.authorityName)
     if not ok then
@@ -695,7 +869,10 @@ function GLD:HandleRollResult(sender, payload)
     end
   end
   local rollID = payload.rollID
-  local rollKey = self.GetRollKeyFromPayload and self:GetRollKeyFromPayload(payload) or nil
+  local rollKey = DeriveRollKey(self, payload)
+  if not rollKey and debugEnabled then
+    self:Debug("Roll result missing rollKey: rollID=" .. tostring(rollID))
+  end
   local sessionKey = nil
   local session = nil
   if self.FindActiveRoll then
@@ -718,7 +895,7 @@ function GLD:HandleRollResult(sender, payload)
     detail = " (override by " .. tostring(by) .. ")"
   end
   self:TraceStep("Winner decided: " .. itemLabel .. " -> " .. winnerLabel .. detail)
-  if self.IsDebugEnabled and self:IsDebugEnabled() then
+  if debugEnabled then
     self:Debug("Result broadcast received: rollID=" .. tostring(payload.rollID) .. " rollKey=" .. tostring(rollKey))
   end
   if sessionKey and self.activeRolls then
@@ -739,6 +916,105 @@ function GLD:HandleRollResult(sender, payload)
   end
   if self.UI and self.UI.RefreshPendingVotes then
     self.UI:RefreshPendingVotes()
+  end
+end
+
+function GLD:HandleRollAck(sender, payload)
+  if not payload then
+    return
+  end
+  if not self:IsAuthority() then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  if self.IsSenderInRaid and not self:IsSenderInRaid(sender) then
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug("Roll ack ignored (sender not in raid): " .. tostring(sender))
+    end
+    return
+  end
+  local rollID = payload.rollID
+  local rollKey = DeriveRollKey(self, payload)
+  if not rollKey then
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug("Roll ack ignored: missing rollKey for rollID=" .. tostring(rollID))
+    end
+    return
+  end
+  local _, session = self.FindActiveRoll and self:FindActiveRoll(rollKey, rollID)
+  if not session then
+    session = self.activeRolls and self.activeRolls[rollKey] or nil
+  end
+  if not session then
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug("Roll ack ignored: no session for rollID=" .. tostring(rollID) .. " rollKey=" .. tostring(rollKey))
+    end
+    return
+  end
+  session.acks = session.acks or {}
+  local voterKey = payload.voterKey or (self.GetRollCandidateKey and self:GetRollCandidateKey(sender)) or sender
+  if voterKey then
+    session.acks[voterKey] = true
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug(
+      "Roll ack received: rollID="
+        .. tostring(rollID)
+        .. " rollKey="
+        .. tostring(rollKey)
+        .. " voter="
+        .. tostring(voterKey)
+        .. " sender="
+        .. tostring(sender)
+    )
+  end
+end
+
+function GLD:HandleRollSessionRequest(sender, payload)
+  if not self:IsAuthority() then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  if self.IsSenderInRaid and not self:IsSenderInRaid(sender) then
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug("Roll session request ignored (sender not in raid): " .. tostring(sender))
+    end
+    return
+  end
+  if not payload then
+    return
+  end
+  local rollID = payload.rollID
+  local rollKey = DeriveRollKey(self, payload)
+  local _, session = self.FindActiveRoll and self:FindActiveRoll(rollKey, rollID)
+  if not session then
+    session = self.activeRolls and rollKey and self.activeRolls[rollKey] or nil
+  end
+  if session then
+    self:BroadcastRollSession(session, { snapshot = true, reopen = true }, sender)
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug(
+        "Roll session resend: rollID="
+          .. tostring(session.rollID)
+          .. " rollKey="
+          .. tostring(session.rollKey)
+          .. " target="
+          .. tostring(sender)
+      )
+    end
+    return
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug(
+      "Roll session request ignored: no session for rollID="
+        .. tostring(rollID)
+        .. " rollKey="
+        .. tostring(rollKey)
+    )
   end
 end
 
