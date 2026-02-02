@@ -19,27 +19,12 @@ local ARMOR_BY_CLASS = {
   EVOKER = {3},
 }
 
-local WEAPON_BY_CLASS = {
-  WARRIOR = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  PALADIN = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  DEATHKNIGHT = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  HUNTER = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  SHAMAN = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  ROGUE = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  DRUID = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  MONK = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  DEMONHUNTER = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  PRIEST = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  MAGE = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  WARLOCK = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-  EVOKER = {0, 1, 2, 3, 4, 5, 6, 7, 8},
-}
-
 local ITEM_CLASS_ARMOR = 4
 local ITEM_CLASS_WEAPON = 2
 local ARMOR_TRINKET = 0
 local ARMOR_RING = 11
 local ARMOR_NECK = 2
+local ARMOR_SHIELD = 6
 
 local ARMOR_SUBCLASS_BY_NAME = {}
 if ITEM_SUBCLASS_ARMOR_CLOTH then
@@ -53,6 +38,107 @@ if ITEM_SUBCLASS_ARMOR_MAIL then
 end
 if ITEM_SUBCLASS_ARMOR_PLATE then
   ARMOR_SUBCLASS_BY_NAME[ITEM_SUBCLASS_ARMOR_PLATE] = 4
+end
+
+local WEAPON_SUBCLASS_BY_NAME = {}
+if ITEM_SUBCLASS_WEAPON_AXE then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_AXE] = 0
+end
+if ITEM_SUBCLASS_WEAPON_AXE2 then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_AXE2] = 1
+end
+if ITEM_SUBCLASS_WEAPON_BOW then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_BOW] = 2
+end
+if ITEM_SUBCLASS_WEAPON_GUN then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_GUN] = 3
+end
+if ITEM_SUBCLASS_WEAPON_MACE then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_MACE] = 4
+end
+if ITEM_SUBCLASS_WEAPON_MACE2 then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_MACE2] = 5
+end
+if ITEM_SUBCLASS_WEAPON_POLEARM then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_POLEARM] = 6
+end
+if ITEM_SUBCLASS_WEAPON_SWORD then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_SWORD] = 7
+end
+if ITEM_SUBCLASS_WEAPON_SWORD2 then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_SWORD2] = 8
+end
+if ITEM_SUBCLASS_WEAPON_WARGLAIVE then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_WARGLAIVE] = 9
+end
+if ITEM_SUBCLASS_WEAPON_STAFF then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_STAFF] = 10
+end
+if ITEM_SUBCLASS_WEAPON_FIST then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_FIST] = 13
+end
+if ITEM_SUBCLASS_WEAPON_DAGGER then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_DAGGER] = 15
+end
+if ITEM_SUBCLASS_WEAPON_CROSSBOW then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_CROSSBOW] = 18
+end
+if ITEM_SUBCLASS_WEAPON_WAND then
+  WEAPON_SUBCLASS_BY_NAME[ITEM_SUBCLASS_WEAPON_WAND] = 19
+end
+
+local WEAPON_CATEGORY_SUBCLASS_IDS = {
+  ["Axes"] = {0, 1},
+  ["Swords"] = {7, 8},
+  ["Maces"] = {4, 5},
+  ["Polearms"] = {6},
+  ["Staves"] = {10},
+  ["Daggers"] = {15},
+  ["Fist Weapons"] = {13},
+  ["Warglaives"] = {9},
+  ["Bows"] = {2},
+  ["Guns"] = {3},
+  ["Crossbows"] = {18},
+  ["Wands"] = {19},
+  ["One-Handed"] = {0, 4, 7},
+  ["Two-Handed"] = {1, 5, 8},
+}
+
+local WEAPON_BY_CLASS = {}
+local SHIELD_BY_CLASS = {}
+
+local function AddUnique(list, value)
+  for _, v in ipairs(list) do
+    if v == value then
+      return
+    end
+  end
+  list[#list + 1] = value
+end
+
+local function AddList(list, values)
+  for _, value in ipairs(values) do
+    AddUnique(list, value)
+  end
+end
+
+for classFile, data in pairs(CLASS_DATA) do
+  local allowed = {}
+  local hasWeapon = false
+  for _, weaponName in ipairs(data.weapons or {}) do
+    if weaponName == "Shields" then
+      SHIELD_BY_CLASS[classFile] = true
+    else
+      local ids = WEAPON_CATEGORY_SUBCLASS_IDS[weaponName]
+      if ids then
+        AddList(allowed, ids)
+        hasWeapon = true
+      end
+    end
+  end
+  if hasWeapon then
+    WEAPON_BY_CLASS[classFile] = allowed
+  end
 end
 
 local CLASS_NAME_TO_FILE = {}
@@ -79,7 +165,7 @@ local TRINKET_DPS_ROLE_BY_CLASS_SPEC = {
   SHAMAN = { Elemental = "RANGEDPS", Enhancement = "MELEEDPS" },
   DRUID = { Balance = "RANGEDPS", Feral = "MELEEDPS" },
   MONK = { Windwalker = "MELEEDPS" },
-  DEMONHUNTER = { Havoc = "MELEEDPS" },
+  DEMONHUNTER = { Havoc = "MELEEDPS", Devourer = "RANGEDPS" },
   MAGE = { Arcane = "RANGEDPS", Fire = "RANGEDPS", Frost = "RANGEDPS" },
   PRIEST = { Shadow = "RANGEDPS" },
   WARLOCK = { Affliction = "RANGEDPS", Demonology = "RANGEDPS", Destruction = "RANGEDPS" },
@@ -405,9 +491,11 @@ function GLD:GetTrinketRoleKey(classFile, specName)
   local classToken = tostring(classFile):upper()
   local specKey = NormalizeSpecName(specName)
   local classData = CLASS_DATA[classToken]
+  local foundSpec = false
   if specKey and classData and classData.specs then
     for name, data in pairs(classData.specs) do
       if name and name:lower() == specKey then
+        foundSpec = true
         local role = data and data.role or nil
         if role == "Tank" then
           return "TANK"
@@ -424,9 +512,31 @@ function GLD:GetTrinketRoleKey(classFile, specName)
               end
             end
           end
+          if self and self.IsDebugEnabled and self:IsDebugEnabled() then
+            self:Debug(
+              "Trinket role fallback: class="
+                .. tostring(classToken)
+                .. " spec="
+                .. tostring(specName)
+                .. " role="
+                .. tostring(CLASS_DEFAULT_DPS_ROLE[classToken] or "DPS")
+            )
+          end
           return CLASS_DEFAULT_DPS_ROLE[classToken] or "DPS"
         end
       end
+    end
+  end
+  if specKey and classData and classData.specs and not foundSpec then
+    if self and self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug(
+        "Unknown spec fallback: class="
+          .. tostring(classToken)
+          .. " spec="
+          .. tostring(specName)
+          .. " role="
+          .. tostring(CLASS_DEFAULT_DPS_ROLE[classToken] or "DPS")
+      )
     end
   end
   return CLASS_DEFAULT_DPS_ROLE[classToken] or nil
@@ -490,9 +600,9 @@ function GLD:IsKnownTrinket(item)
   return false
 end
 
-function GLD:IsTrinketEligibleForNeed(classFile, item, specName)
+function GLD:IsTrinketEligibleForNeed(classFile, item, specName, rolesOverride)
   local itemId = GetItemId(item)
-  local roles = self:GetTrinketRoleRestriction(itemId)
+  local roles = rolesOverride or self:GetTrinketRoleRestriction(itemId)
   if roles then
     local roleKey = self:GetTrinketRoleKey(classFile, specName)
     if roleKey == "DPS" then
@@ -503,48 +613,123 @@ function GLD:IsTrinketEligibleForNeed(classFile, item, specName)
   return true
 end
 
-function GLD:IsEligibleForNeed(classFile, item, specName)
-  if not classFile or not item then
-    return false
+local function DebugNeedDenied(self, item, equipLoc, rule)
+  if not self or not self.IsDebugEnabled or not self:IsDebugEnabled() then
+    return
   end
+  local itemType, itemSubType = nil, nil
+  if GetItemInfo then
+    itemType, itemSubType = select(6, GetItemInfo(item))
+  end
+  self:Debug(
+    "Need denied: item="
+      .. tostring(item)
+      .. " equipLoc="
+      .. tostring(equipLoc)
+      .. " type="
+      .. tostring(itemType)
+      .. "/"
+      .. tostring(itemSubType)
+      .. " rule="
+      .. tostring(rule)
+  )
+end
+
+function GLD:IsEligibleForNeed(classFile, item, specName, context)
+  if not classFile or not item then
+    return false, "missing_input"
+  end
+  local trinketRoles = context and context.trinketRoles or nil
   local isTrinketByInfo = self.IsItemInfoTrinket and self:IsItemInfoTrinket(item) or false
-  local classID, subClassID, _, equipLoc = C_Item.GetItemInfoInstant(item)
+  local isTrinketSnapshot = trinketRoles ~= nil
+  local _, _, _, equipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(item)
   if not classID then
-    if isTrinketByInfo or self:IsKnownTrinket(item) then
-      return self:IsTrinketEligibleForNeed(classFile, item, specName)
+    if isTrinketSnapshot or isTrinketByInfo or self:IsKnownTrinket(item) then
+      local ok = self:IsTrinketEligibleForNeed(classFile, item, specName, trinketRoles)
+      if ok then
+        return true, nil
+      end
+      DebugNeedDenied(self, item, equipLoc, "trinket_role")
+      return false, "ineligible_trinket_role"
     end
     self:RequestItemData(item)
-    return false
+    return false, "item_data_missing"
+  end
+  if not equipLoc or equipLoc == "" or subClassID == nil then
+    self:RequestItemData(item)
+    return false, "item_data_missing"
   end
 
   local classRestriction = self:GetItemClassRestrictions(item)
   if classRestriction then
-    return classRestriction[classFile] == true
+    if classRestriction[classFile] == true then
+      return true, nil
+    end
+    local reason = "ineligible_class_restriction"
+    if self.GetItemSetName then
+      local setName = self:GetItemSetName(item)
+      if setName and setName ~= "" then
+        reason = "ineligible_tier"
+      end
+    end
+    DebugNeedDenied(self, item, equipLoc, reason == "ineligible_tier" and "tier" or "class_restriction")
+    return false, reason
   end
 
   if classID == ITEM_CLASS_ARMOR then
     if subClassID == ARMOR_TRINKET or equipLoc == "INVTYPE_TRINKET" or isTrinketByInfo then
-      return self:IsTrinketEligibleForNeed(classFile, item, specName)
+      local ok = self:IsTrinketEligibleForNeed(classFile, item, specName, trinketRoles)
+      if ok then
+        return true, nil
+      end
+      DebugNeedDenied(self, item, equipLoc, "trinket_role")
+      return false, "ineligible_trinket_role"
     end
-    if subClassID == ARMOR_RING or subClassID == ARMOR_NECK then
-      return true
+    if equipLoc == "INVTYPE_FINGER" or equipLoc == "INVTYPE_CLOAK" or equipLoc == "INVTYPE_NECK" then
+      return true, nil
+    end
+    if equipLoc == "INVTYPE_SHIELD" or subClassID == ARMOR_SHIELD then
+      if SHIELD_BY_CLASS[classFile] then
+        return true, nil
+      end
+      DebugNeedDenied(self, item, equipLoc, "shield")
+      return false, "ineligible_shield"
     end
     local allowed = ARMOR_BY_CLASS[classFile]
     if allowed and Contains(allowed, subClassID) then
-      return true
+      return true, nil
     end
     local _, _, _, _, _, itemType, itemSubType = GetItemInfo(item)
     local fallbackSub = itemSubType and ARMOR_SUBCLASS_BY_NAME[itemSubType]
-    return allowed and fallbackSub and Contains(allowed, fallbackSub) or false
+    if allowed and fallbackSub and Contains(allowed, fallbackSub) then
+      return true, nil
+    end
+    DebugNeedDenied(self, item, equipLoc, "armor")
+    return false, "ineligible_armor"
   end
 
   if classID == ITEM_CLASS_WEAPON then
     local allowed = WEAPON_BY_CLASS[classFile]
-    return allowed and Contains(allowed, subClassID)
+    if allowed and Contains(allowed, subClassID) then
+      return true, nil
+    end
+    local _, _, _, _, _, itemType, itemSubType = GetItemInfo(item)
+    local fallbackSub = itemSubType and WEAPON_SUBCLASS_BY_NAME[itemSubType]
+    if allowed and fallbackSub and Contains(allowed, fallbackSub) then
+      return true, nil
+    end
+    DebugNeedDenied(self, item, equipLoc, "weapon")
+    return false, "ineligible_weapon"
   end
 
-  if isTrinketByInfo or self:IsKnownTrinket(item) then
-    return self:IsTrinketEligibleForNeed(classFile, item, specName)
+  if isTrinketSnapshot or isTrinketByInfo or self:IsKnownTrinket(item) then
+    local ok = self:IsTrinketEligibleForNeed(classFile, item, specName, trinketRoles)
+    if ok then
+      return true, nil
+    end
+    DebugNeedDenied(self, item, equipLoc, "trinket_role")
+    return false, "ineligible_trinket_role"
   end
-  return false
+  DebugNeedDenied(self, item, equipLoc, "unknown_slot")
+  return false, "ineligible_item_type"
 end

@@ -2,6 +2,9 @@ local _, NS = ...
 
 local GLD = NS.GLD
 local RAID_STATE_REFRESH_SECONDS = 20
+local LEAVE_ZONE_WARNING_SECONDS = 60
+local START_SESSION_POPUP = "GLD_START_SESSION_CONFIRM"
+local END_SESSION_POPUP = "GLD_END_SESSION_CONFIRM"
 
 function GLD:InitAttendance()
   if not self.db.session then
@@ -11,6 +14,7 @@ function GLD:InitAttendance()
       attended = {},
       raidSessionId = nil,
       currentBoss = nil,
+      zoneInstanceID = nil,
     }
   end
 end
@@ -26,6 +30,138 @@ function GLD:GetActiveRaidSession()
     end
   end
   return nil
+end
+
+function GLD:GetRaidMemberCounts()
+  local guildCount, nonGuildCount, total = 0, 0, 0
+  if not IsInRaid() then
+    return guildCount, nonGuildCount, total
+  end
+  local ourGuild = self.GetOurGuildName and self:GetOurGuildName() or nil
+  for i = 1, GetNumGroupMembers() do
+    local unit = "raid" .. i
+    if UnitExists(unit) and UnitIsConnected(unit) then
+      total = total + 1
+      local isGuild = false
+      if UnitIsInMyGuild then
+        isGuild = UnitIsInMyGuild(unit)
+      elseif ourGuild then
+        local guildName = GetGuildInfo(unit)
+        isGuild = guildName and guildName == ourGuild or false
+      end
+      if isGuild then
+        guildCount = guildCount + 1
+      else
+        nonGuildCount = nonGuildCount + 1
+      end
+    end
+  end
+  return guildCount, nonGuildCount, total
+end
+
+function GLD:PromptStartSession()
+  if self.db.session.active then
+    return
+  end
+  if not IsInRaid() then
+    self:Print("You must be in a raid to start a session.")
+    return
+  end
+  if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
+    self:Print("you do not have Guild Permission to access this panel")
+    return
+  end
+  local guildCount, nonGuildCount, total = self:GetRaidMemberCounts()
+  if not StaticPopupDialogs then
+    self:StartSession()
+    return
+  end
+  StaticPopupDialogs[START_SESSION_POPUP] = StaticPopupDialogs[START_SESSION_POPUP] or {}
+  local dialog = StaticPopupDialogs[START_SESSION_POPUP]
+  dialog.text = string.format("Start Raid session?\nGuild: %d / Total: %d\nNon-guild: %d", guildCount, total, nonGuildCount)
+  dialog.button1 = "Confirm"
+  dialog.button2 = "Cancel"
+  dialog.timeout = 0
+  dialog.whileDead = true
+  dialog.hideOnEscape = true
+  dialog.OnAccept = function()
+    if GLD and GLD.StartSession then
+      GLD:StartSession()
+    end
+  end
+  StaticPopup_Show(START_SESSION_POPUP)
+end
+
+function GLD:PromptEndSession()
+  if not self.db.session.active then
+    return
+  end
+  if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
+    self:Print("you do not have Guild Permission to access this panel")
+    return
+  end
+  if not StaticPopupDialogs then
+    self:EndSession()
+    return
+  end
+  StaticPopupDialogs[END_SESSION_POPUP] = StaticPopupDialogs[END_SESSION_POPUP] or {}
+  local dialog = StaticPopupDialogs[END_SESSION_POPUP]
+  dialog.text = "End Raid session? Are you sure?"
+  dialog.button1 = "Confirm"
+  dialog.button2 = "Cancel"
+  dialog.timeout = 0
+  dialog.whileDead = true
+  dialog.hideOnEscape = true
+  dialog.OnAccept = function()
+    if GLD and GLD.EndSession then
+      GLD:EndSession()
+    end
+  end
+  StaticPopup_Show(END_SESSION_POPUP)
+end
+
+function GLD:StartLeaveZoneTimer()
+  if self.leaveZoneTimer or not C_Timer or not C_Timer.NewTimer then
+    return
+  end
+  self:Print("You left the raid zone. Session will end in 60 seconds. Return or end manually.")
+  self.leaveZoneTimer = C_Timer.NewTimer(LEAVE_ZONE_WARNING_SECONDS, function()
+    self.leaveZoneTimer = nil
+    if self.PromptEndSession then
+      self:PromptEndSession()
+    elseif self.EndSession then
+      self:EndSession()
+    end
+  end)
+end
+
+function GLD:CancelLeaveZoneTimer()
+  if self.leaveZoneTimer then
+    self.leaveZoneTimer:Cancel()
+    self.leaveZoneTimer = nil
+  end
+end
+
+function GLD:CheckSessionZoneStatus()
+  if not self.db or not self.db.session or not self.db.session.active then
+    self:CancelLeaveZoneTimer()
+    return
+  end
+  if not self:IsAuthority() then
+    self:CancelLeaveZoneTimer()
+    return
+  end
+  local raidSession = self.GetActiveRaidSession and self:GetActiveRaidSession() or nil
+  local sessionInstanceId = raidSession and raidSession.instanceID or self.db.session.zoneInstanceID
+  if not sessionInstanceId or sessionInstanceId == 0 then
+    return
+  end
+  local _, _, _, _, _, _, _, instanceId = GetInstanceInfo()
+  if instanceId ~= sessionInstanceId then
+    self:StartLeaveZoneTimer()
+  else
+    self:CancelLeaveZoneTimer()
+  end
 end
 
 function GLD:StartRaidSession()
@@ -74,7 +210,11 @@ function GLD:StartSession()
   self.db.session.active = true
   self.db.session.startedAt = GetServerTime()
   self.db.session.attended = {}
-  self:StartRaidSession()
+  local raidSession = self:StartRaidSession()
+  self.db.session.zoneInstanceID = raidSession and raidSession.instanceID or nil
+  if self.CancelLeaveZoneTimer then
+    self:CancelLeaveZoneTimer()
+  end
   if self.RebuildGroupRoster then
     self:RebuildGroupRoster()
   end
@@ -85,6 +225,13 @@ function GLD:StartSession()
   self:EnsureQueuePositions()
   if self.MarkDBChanged then
     self:MarkDBChanged("session_start")
+  end
+  if self.LogAuditEvent then
+    local actor = self:GetUnitFullName("player") or UnitName("player") or "Unknown"
+    self:LogAuditEvent("SESSION_START", { actor = actor })
+  end
+  if self.BroadcastSessionState then
+    self:BroadcastSessionState()
   end
   self:BroadcastSnapshot()
   self:Print("Session started")
@@ -97,6 +244,19 @@ function GLD:EndSession()
   if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
     self:Print("you do not have Guild Permission to access this panel")
     return
+  end
+  if self.AutoMarkCurrentGroup then
+    self:AutoMarkCurrentGroup()
+  end
+  if self.LogRaidAttendanceAudit then
+    self:LogRaidAttendanceAudit()
+  end
+  if self.LogAuditEvent then
+    local actor = self:GetUnitFullName("player") or UnitName("player") or "Unknown"
+    self:LogAuditEvent("SESSION_END", { actor = actor })
+  end
+  if self.CancelLeaveZoneTimer then
+    self:CancelLeaveZoneTimer()
   end
   self.db.session.active = false
   if self.shadow then
@@ -111,8 +271,12 @@ function GLD:EndSession()
   end
   self.db.session.raidSessionId = nil
   self.db.session.currentBoss = nil
+  self.db.session.zoneInstanceID = nil
   if self.MarkDBChanged then
     self:MarkDBChanged("session_end")
+  end
+  if self.BroadcastSessionState then
+    self:BroadcastSessionState(true)
   end
   if self.UI and self.UI.RefreshHistoryIfOpen then
     self.UI:RefreshHistoryIfOpen()
@@ -174,22 +338,34 @@ function GLD:AutoMarkCurrentGroup()
   for i = 1, count do
     local unit = "raid" .. i
     if UnitExists(unit) and UnitIsConnected(unit) then
-      local playerKey, isNew = self:UpsertPlayerFromUnit(unit)
-      if playerKey then
-        presentKeys[playerKey] = true
-        if isNew then
-          changed = true
+      local shouldTrack = true
+      if self.IsGuest and self:IsGuest(unit) then
+        local existingPlayer = nil
+        if self.GetDBPlayerForUnit then
+          existingPlayer = select(1, self:GetDBPlayerForUnit(unit))
         end
-        if self.db.session.active and not self.db.session.attended[playerKey] then
-          local player = self.db.players[playerKey]
-          player.attendanceCount = (player.attendanceCount or 0) + 1
-          self.db.session.attended[playerKey] = true
-          if self.MarkDBChanged then
-            self:MarkDBChanged("attendance_count")
+        if not existingPlayer then
+          shouldTrack = false
+        end
+      end
+      if shouldTrack then
+        local playerKey, isNew = self:UpsertPlayerFromUnit(unit)
+        if playerKey then
+          presentKeys[playerKey] = true
+          if isNew then
+            changed = true
           end
-        end
-        if self.SetAttendance and self:SetAttendance(playerKey, "PRESENT") then
-          changed = true
+          if self.db.session.active and not self.db.session.attended[playerKey] then
+            local player = self.db.players[playerKey]
+            player.attendanceCount = (player.attendanceCount or 0) + 1
+            self.db.session.attended[playerKey] = true
+            if self.MarkDBChanged then
+              self:MarkDBChanged("attendance_count")
+            end
+          end
+          if self.SetAttendance and self:SetAttendance(playerKey, "PRESENT") then
+            changed = true
+          end
         end
       end
     end
@@ -206,6 +382,33 @@ function GLD:AutoMarkCurrentGroup()
   return changed
 end
 
+function GLD:LogRaidAttendanceAudit()
+  if not self.db or not self.db.session or not self.db.session.attended then
+    return
+  end
+  if not self.LogAuditEvent then
+    return
+  end
+  for key, present in pairs(self.db.session.attended) do
+    if present then
+      local player = self.db.players and self.db.players[key]
+      local isGuest = false
+      if player and self.IsGuestEntry then
+        isGuest = self:IsGuestEntry(player)
+      end
+      local classFile = player and (player.classFile or player.classFileName or player.class)
+      local specName = player and (player.specName or player.spec)
+      local targetName = player and player.name or key
+      self:LogAuditEvent("RAID_ATTENDED", {
+        target = targetName,
+        isGuest = isGuest,
+        class = classFile,
+        spec = specName,
+      })
+    end
+  end
+end
+
 function GLD:OnGroupRosterUpdate()
   local _, _, added = nil, nil, nil
   if self.RebuildGroupRoster then
@@ -214,25 +417,24 @@ function GLD:OnGroupRosterUpdate()
   if self.WelcomeGuestsFromGroup then
     self:WelcomeGuestsFromGroup()
   end
-  if self:IsAuthority() and self.db.session.active and IsInRaid() and self.BroadcastActiveRollsSnapshot then
+  local sessionActive = self.db and self.db.session and self.db.session.active == true
+  if self:IsAuthority() and sessionActive and IsInRaid() and self.BroadcastActiveRollsSnapshot then
     if added and #added > 0 then
       self:BroadcastActiveRollsSnapshot(added)
     end
   end
-  if not self.db.session.active then
-    if self.QueueGroupSpecSync then
-      self:QueueGroupSpecSync()
-    end
-    if self.UI then
-      self.UI:RefreshMain()
-    end
-    return
+  if sessionActive and self.AutoMarkCurrentGroup then
+    self:AutoMarkCurrentGroup()
   end
-  self:AutoMarkCurrentGroup()
   if self.QueueGroupSpecSync then
     self:QueueGroupSpecSync()
   end
-  self:BroadcastSnapshot()
+  if self.BroadcastSnapshot then
+    self:BroadcastSnapshot()
+  end
+  if sessionActive and self.CheckSessionZoneStatus then
+    self:CheckSessionZoneStatus()
+  end
   if self.UI then
     self.UI:RefreshMain()
   end

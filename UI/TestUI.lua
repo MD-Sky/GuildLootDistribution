@@ -264,10 +264,8 @@ local function BuildDynamicTestVoters()
     end
     local classFile = select(2, UnitClass(unit))
     local armor = GetArmorForClass(classFile)
-    local displayName = name
-    if realm and realm ~= "" then
-      displayName = name .. "-" .. realm
-    end
+    local isGuest = GLD and GLD.IsGuest and GLD:IsGuest(unit) or false
+    local displayName = NS:GetPlayerDisplayName(name, isGuest)
     local specName = nil
     if GLD and GLD.FindPlayerKeyByName then
       local key = GLD:FindPlayerKeyByName(name, realm)

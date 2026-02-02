@@ -42,6 +42,17 @@ local function ClearHoldPos(player)
   player.savedPos = nil
 end
 
+local function CountRosterEntries(players)
+  local count = 0
+  if type(players) ~= "table" then
+    return count
+  end
+  for _ in pairs(players) do
+    count = count + 1
+  end
+  return count
+end
+
 function GLD:RemoveFromQueue(key, skipRevision)
   if not key then
     return false
@@ -182,6 +193,36 @@ function GLD:EnsureQueuePositions()
   self:CompactQueue()
 end
 
+function GLD:OnRosterChanged(reason)
+  if self.EnsureQueuePositions then
+    self:EnsureQueuePositions()
+  end
+  if self.MarkDBChanged then
+    self:MarkDBChanged(reason or "roster_changed")
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    local revision = self.db and self.db.meta and self.db.meta.revision or 0
+    local rosterCount = CountRosterEntries(self.db and self.db.players or nil)
+    local sessionActive = self.db and self.db.session and self.db.session.active == true
+    self:Debug(
+      "Roster changed: reason="
+        .. tostring(reason or "roster_changed")
+        .. " revision="
+        .. tostring(revision)
+        .. " rosterCount="
+        .. tostring(rosterCount)
+        .. " sessionActive="
+        .. tostring(sessionActive)
+    )
+  end
+  if self.BroadcastSnapshot then
+    self:BroadcastSnapshot(true)
+  end
+  if self.UI and self.UI.RefreshMain then
+    self.UI:RefreshMain()
+  end
+end
+
 function GLD:MoveToQueueBottom(key)
   if not key then
     return
@@ -228,6 +269,68 @@ function GLD:OnAwardedItem(key)
     self:MarkDBChanged("award_item")
   end
   return true
+end
+
+function GLD:RosterRemoveMember(key)
+  if not key then
+    return false, "missing_player_key"
+  end
+  if not self.db or not self.db.players then
+    return false, "missing_db"
+  end
+  if not self.db.players[key] then
+    return false, "missing_player"
+  end
+
+  if self.RemovePlayerFromDatabase then
+    local ok = self:RemovePlayerFromDatabase(key)
+    if ok then
+      return true, nil
+    end
+    return false, "remove_failed"
+  end
+
+  if self.RemoveFromQueue then
+    self:RemoveFromQueue(key, true)
+  end
+
+  if self.db.queue then
+    for i = #self.db.queue, 1, -1 do
+      if self.db.queue[i] == key then
+        table.remove(self.db.queue, i)
+      end
+    end
+  end
+
+  if self.db.session and self.db.session.attended then
+    self.db.session.attended[key] = nil
+  end
+
+  self.db.players[key] = nil
+
+  if self.CompactQueue then
+    self:CompactQueue()
+  end
+  if self.MarkDBChanged then
+    self:MarkDBChanged("player_remove")
+  end
+
+  return true, nil
+end
+
+function GLD:RemoveRosterMember(key)
+  local ok, reason = false, "remove_failed"
+  if self.RosterRemoveMember then
+    ok, reason = self:RosterRemoveMember(key)
+  end
+  if ok and self.OnRosterChanged then
+    self:OnRosterChanged("roster_remove")
+  end
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    local outcome = ok and "ok" or (reason or "failed")
+    self:Debug("Roster remove authority: key=" .. tostring(key) .. " result=" .. tostring(outcome))
+  end
+  return ok, reason
 end
 
 function GLD:RemovePlayerFromDatabase(key)

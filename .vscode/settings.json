@@ -64,7 +64,9 @@
         "PanelTemplates_SelectTab",
         "PanelTemplates_DeselectTab",
         "PanelTemplates_TabResize",
-        "ITEM_SET_NAME"
+        "ITEM_SET_NAME",
+        "StaticPopupDialogs",
+        "StaticPopup_Show"
     ],
     "Lua.type.weakUnionCheck": true,
     "Lua.diagnostics.disable": [

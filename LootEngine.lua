@@ -20,6 +20,17 @@ local function GetItemReference(itemContext)
   return itemContext.itemLink or itemContext.itemID or itemContext.itemName
 end
 
+local function GetEligibilityContext(itemContext)
+  if not itemContext then
+    return nil
+  end
+  local snapshot = itemContext.restrictionSnapshot
+  if snapshot and snapshot.trinketRoles then
+    return { trinketRoles = snapshot.trinketRoles }
+  end
+  return nil
+end
+
 local function IsItemDataReady(itemRef)
   if not itemRef or not C_Item or not C_Item.GetItemInfoInstant then
     return false
@@ -56,7 +67,7 @@ local function GetEligibilityChecker(voteType)
 end
 
 local function ShouldFilterVoteType(voteType)
-  return voteType == "NEED" or voteType == "TRANSMOG"
+  return voteType == "NEED"
 end
 
 function LootEngine:BuildEligiblePlayers(itemContext, provider)
@@ -147,6 +158,7 @@ function LootEngine:ResolveWinner(votes, provider, rules, itemContext)
       return candidates, beforeCount, beforeCount
     end
 
+    local context = GetEligibilityContext(itemContext)
     local eligible = {}
     for _, key in ipairs(candidates) do
       local player = provider.GetPlayer and provider:GetPlayer(key) or nil
@@ -154,7 +166,7 @@ function LootEngine:ResolveWinner(votes, provider, rules, itemContext)
       if classFile and classFile ~= "" then
         classFile = tostring(classFile):upper()
         local specName = GetPlayerSpecName(player)
-        local ok = checker(GLD, classFile, itemRef, specName)
+        local ok = checker(GLD, classFile, itemRef, specName, context)
         if ok then
           eligible[#eligible + 1] = key
         else
@@ -174,6 +186,40 @@ function LootEngine:ResolveWinner(votes, provider, rules, itemContext)
     return eligible, beforeCount, #eligible
   end
 
+  local function getOrCreateRoll(key)
+    local session = itemContext
+    if not session then
+      return nil
+    end
+    local details = session.voteDetails
+    local detail = details and details[key] or nil
+    if detail and detail.roll ~= nil then
+      return detail.roll
+    end
+    if not (session.isTest or (GLD and GLD.IsAuthority and GLD:IsAuthority())) then
+      return nil
+    end
+    local roll = math.random(1, 100)
+    session.voteDetails = session.voteDetails or {}
+    detail = session.voteDetails[key]
+    if not detail then
+      detail = {
+        voteOriginal = session.votes and session.votes[key] or nil,
+        voteEffective = session.votes and session.votes[key] or nil,
+      }
+      session.voteDetails[key] = detail
+    else
+      if detail.voteOriginal == nil then
+        detail.voteOriginal = session.votes and session.votes[key] or nil
+      end
+      if detail.voteEffective == nil then
+        detail.voteEffective = session.votes and session.votes[key] or nil
+      end
+    end
+    detail.roll = roll
+    return roll
+  end
+
   for _, voteType in ipairs(priority) do
     local candidates = buildCandidates(voteType)
     local eligible, beforeCount, afterCount = filterEligible(voteType, candidates)
@@ -184,15 +230,39 @@ function LootEngine:ResolveWinner(votes, provider, rules, itemContext)
     end
     if #eligible > 0 then
       local winnerKey = nil
-      local bestPos = nil
-      local bestName = nil
-      for _, key in ipairs(eligible) do
-        local pos = getQueuePos(key) or 99999
-        local name = getName(key) or key
-        if not winnerKey or pos < bestPos or (pos == bestPos and name < (bestName or "~")) then
-          winnerKey = key
-          bestPos = pos
-          bestName = name
+      if voteType == "GREED" or voteType == "TRANSMOG" then
+        local bestRoll = nil
+        local bestName = nil
+        for _, key in ipairs(eligible) do
+          local roll = nil
+          if itemContext and itemContext.voteDetails and itemContext.voteDetails[key] then
+            roll = itemContext.voteDetails[key].roll
+          end
+          if roll == nil then
+            roll = getOrCreateRoll(key)
+          end
+          local name = getName(key) or key
+          local rollValue = roll
+          if rollValue == nil then
+            rollValue = -1
+          end
+          if not winnerKey or rollValue > bestRoll or (rollValue == bestRoll and name < (bestName or "~")) then
+            winnerKey = key
+            bestRoll = rollValue
+            bestName = name
+          end
+        end
+      else
+        local bestPos = nil
+        local bestName = nil
+        for _, key in ipairs(eligible) do
+          local pos = getQueuePos(key) or 99999
+          local name = getName(key) or key
+          if not winnerKey or pos < bestPos or (pos == bestPos and name < (bestName or "~")) then
+            winnerKey = key
+            bestPos = pos
+            bestName = name
+          end
         end
       end
       if winnerKey then

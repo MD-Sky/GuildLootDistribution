@@ -22,6 +22,59 @@ local function FormatDuration(startedAt, endedAt)
   return string.format("%dh %dm", hours, mins)
 end
 
+local function NormalizeHistoryName(name)
+  if not name then
+    return ""
+  end
+  if type(name) == "string" and name:match("^Player%-") then
+    return name:lower()
+  end
+  local base = NS and NS.GetPlayerBaseName and NS:GetPlayerBaseName(name) or name
+  return tostring(base or ""):lower()
+end
+
+local function GetHistoryPlayerEntry(name, key)
+  if not GLD or not GLD.db or not GLD.db.players then
+    return nil
+  end
+  local playerKey = key
+  if not playerKey and name and GLD.FindPlayerKeyByName and NS and NS.SplitNameRealm then
+    local base, realm = NS:SplitNameRealm(name)
+    if base then
+      playerKey = GLD:FindPlayerKeyByName(base, realm)
+    end
+  end
+  if playerKey and GLD.db.players[playerKey] then
+    return GLD.db.players[playerKey], playerKey
+  end
+  return nil
+end
+
+local function GetHistoryDisplayName(name, key, isGuestOverride)
+  if not name or name == "" then
+    return "?"
+  end
+  if type(name) == "string" and name:match("^Player%-") then
+    return name
+  end
+  if name == "Unclaimed" or name == "None" then
+    return name
+  end
+  local player = GetHistoryPlayerEntry(name, key)
+  local isGuest = isGuestOverride == true
+  if isGuestOverride == nil and player and GLD and GLD.IsGuestEntry then
+    isGuest = GLD:IsGuestEntry(player)
+  end
+  if NS and NS.GetPlayerDisplayName then
+    return NS:GetPlayerDisplayName(name, isGuest)
+  end
+  return name
+end
+
+local function NamesMatch(a, b)
+  return NormalizeHistoryName(a) == NormalizeHistoryName(b)
+end
+
 local VOTE_TYPES = { "NEED", "GREED", "TRANSMOG", "PASS" }
 local VOTE_LABELS = {
   NEED = "Need",
@@ -29,6 +82,23 @@ local VOTE_LABELS = {
   TRANSMOG = "Transmog",
   PASS = "Pass",
 }
+
+local function HighlightRollNumber(roll)
+  if roll == nil then
+    return nil
+  end
+  return "|cffffd200" .. tostring(roll) .. "|r"
+end
+
+local function ResolveWinnerVote(item)
+  if item and item.winnerVote then
+    return item.winnerVote
+  end
+  if item and item.winnerName and item.votes then
+    return item.votes[item.winnerName]
+  end
+  return nil
+end
 
 local function BuildVoteCounts(entry)
   local counts = { NEED = 0, GREED = 0, TRANSMOG = 0, PASS = 0 }
@@ -99,7 +169,7 @@ local function AddHistoryVoteDetails(self, item)
   if not self.historyDetailScroll then
     return
   end
-  local hasDetails = item and (item.votes ~= nil or item.voteCounts ~= nil)
+  local hasDetails = item and (item.votes ~= nil or item.voteCounts ~= nil or item.voteDetails ~= nil)
   if not hasDetails then
     local none = AceGUI:Create("Label")
     none:SetFullWidth(true)
@@ -115,20 +185,64 @@ local function AddHistoryVoteDetails(self, item)
     counts.NEED, counts.GREED, counts.TRANSMOG, counts.PASS))
   self.historyDetailScroll:AddChild(totals)
 
-  local groups = BuildVoteGroups(item)
+  local winnerVote = ResolveWinnerVote(item)
   for _, voteType in ipairs(VOTE_TYPES) do
-    local names = groups[voteType] or {}
-    local listText = (#names > 0) and table.concat(names, ", ") or "none"
+    local entries = GLD and GLD.BuildResultVoteEntries and GLD:BuildResultVoteEntries(item, voteType) or nil
+    local listText = "none"
+    if entries and #entries > 0 then
+      local parts = {}
+      for _, entry in ipairs(entries) do
+        local rawName = entry.name or "?"
+        local displayName = GetHistoryDisplayName(rawName)
+        local rollText = entry.roll ~= nil and tostring(entry.roll) or nil
+        if rollText and NamesMatch(item.winnerName, rawName) and winnerVote == voteType then
+          rollText = HighlightRollNumber(entry.roll)
+        end
+        local label = displayName
+        if rollText then
+          label = label .. " " .. rollText
+        end
+        local orig = entry.voteOriginal or entry.voteEffective
+        local eff = entry.voteEffective or entry.voteOriginal
+        if orig or eff then
+          label = label .. " (" .. tostring(orig or "?") .. "->" .. tostring(eff or "?")
+          local reason = entry.reasonText or entry.reason
+          if reason and reason ~= "" then
+            label = label .. ": " .. tostring(reason)
+          end
+          label = label .. ")"
+        end
+        parts[#parts + 1] = label
+      end
+      listText = table.concat(parts, ", ")
+    end
     local row = AceGUI:Create("Label")
     row:SetFullWidth(true)
     row:SetText(string.format("  %s: %s", VOTE_LABELS[voteType] or voteType, listText))
     self.historyDetailScroll:AddChild(row)
   end
 
+  local instructionLine = GLD and GLD.BuildRollResultInstructionLine and GLD:BuildRollResultInstructionLine(item) or nil
+  if item.instructionText then
+    local voteText = item.winnerVote or "ROLL"
+    local displayWinner = GetHistoryDisplayName(item.winnerName, item.winnerKey, item.winnerIsGuest)
+    instructionLine = "Winner via " .. tostring(voteText) .. ": " .. tostring(displayWinner) .. " - " .. tostring(item.instructionText)
+  end
+  if instructionLine then
+    local instruction = AceGUI:Create("Label")
+    instruction:SetFullWidth(true)
+    instruction:SetText("  " .. tostring(instructionLine))
+    self.historyDetailScroll:AddChild(instruction)
+  end
+
   if item.missingAtLock and #item.missingAtLock > 0 then
     local missing = AceGUI:Create("Label")
     missing:SetFullWidth(true)
-    missing:SetText("  Missing at lock: " .. table.concat(item.missingAtLock, ", "))
+    local names = {}
+    for _, name in ipairs(item.missingAtLock) do
+      names[#names + 1] = GetHistoryDisplayName(name)
+    end
+    missing:SetText("  Missing at lock: " .. table.concat(names, ", "))
     self.historyDetailScroll:AddChild(missing)
   end
 end
@@ -206,7 +320,8 @@ local function AddHistoryLootEntry(self, item, entryKey)
 
   local winnerLabel = AceGUI:Create("InteractiveLabel")
   winnerLabel:SetWidth(160)
-  winnerLabel:SetText("Winner: " .. tostring(item.winnerName or "None"))
+  local displayWinner = GetHistoryDisplayName(item.winnerName or "None", item.winnerKey, item.winnerIsGuest)
+  winnerLabel:SetText("Winner: " .. tostring(displayWinner))
   winnerLabel:SetCallback("OnClick", function()
     ToggleHistoryLootEntry(self, entryKey)
     self:RefreshHistoryDetails()
@@ -565,7 +680,8 @@ function UI:ShowHistorySummaryPopup(session)
   for _, boss in ipairs(session.bosses or {}) do
     lines[#lines + 1] = string.format("Boss: %s (%s)", boss.encounterName or "Boss", FormatDateTime(boss.killedAt))
     for _, item in ipairs(boss.loot or {}) do
-      lines[#lines + 1] = string.format("  - %s -> %s", item.itemName or item.itemLink or "Unknown Item", item.winnerName or "None")
+      local displayWinner = GetHistoryDisplayName(item.winnerName or "None", item.winnerKey, item.winnerIsGuest)
+      lines[#lines + 1] = string.format("  - %s -> %s", item.itemName or item.itemLink or "Unknown Item", displayWinner)
     end
   end
 

@@ -32,8 +32,25 @@ function LiveProvider:GetHeldPos(key)
 end
 
 function LiveProvider:GetPlayerName(key)
+  if not key then
+    return nil
+  end
+  local isGuid = type(key) == "string" and key:match("^Player%-") ~= nil
   local player = self:GetPlayer(key)
+  if not player and isGuid and GLD and GLD.UpsertPlayerFromUnit and IsInRaid() then
+    for i = 1, GetNumGroupMembers() do
+      local unit = "raid" .. i
+      if UnitExists(unit) and UnitGUID(unit) == key then
+        GLD:UpsertPlayerFromUnit(unit)
+        player = self:GetPlayer(key)
+        break
+      end
+    end
+  end
   if player and player.name then
+    if isGuid then
+      return player.name
+    end
     if player.realm and player.realm ~= "" then
       return player.name .. "-" .. player.realm
     end

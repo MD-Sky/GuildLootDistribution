@@ -175,6 +175,9 @@ NS.CLASS_DATA = {
         role = "DPS",
         preferredWeapons = { "Dual-Wield Warglaives", "Dual-Wield One-Handed" },
       },
+      Devourer = {
+        role = "DPS",
+      },
       Vengeance = {
         role = "Tank",
         preferredWeapons = { "Dual-Wield Warglaives", "Dual-Wield One-Handed" },

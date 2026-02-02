@@ -154,6 +154,13 @@ function GLD:BuildRollSessionPayload(session, options)
       expectedClasses[k] = v
     end
   end
+  local restrictionSnapshot = nil
+  if session.restrictionSnapshot then
+    restrictionSnapshot = {}
+    for k, v in pairs(session.restrictionSnapshot) do
+      restrictionSnapshot[k] = v
+    end
+  end
 
   return {
     rollID = session.rollID,
@@ -169,10 +176,14 @@ function GLD:BuildRollSessionPayload(session, options)
     canNeed = session.canNeed,
     canGreed = session.canGreed,
     canTransmog = session.canTransmog,
+    blizzNeedAllowed = session.blizzNeedAllowed,
+    blizzGreedAllowed = session.blizzGreedAllowed,
+    blizzTransmogAllowed = session.blizzTransmogAllowed,
     expectedVoters = expected,
     expectedVoterClasses = expectedClasses,
     createdAt = session.createdAt,
     votes = votes,
+    restrictionSnapshot = restrictionSnapshot,
     authorityGUID = self:GetAuthorityGUID(),
     authorityName = self:GetAuthorityName(),
     reopen = options and options.reopen or nil,
@@ -384,6 +395,217 @@ function GLD:BuildExpectedVoters()
   return list
 end
 
+local TRINKET_ROLE_LABELS = {
+  TANK = "Tanks",
+  HEALER = "Healers",
+  MELEEDPS = "Melee DPS",
+  RANGEDPS = "Ranged DPS",
+  DPS = "DPS",
+}
+
+local TRINKET_ROLE_ORDER = { "TANK", "HEALER", "MELEEDPS", "RANGEDPS", "DPS" }
+
+local function FormatTrinketRoleList(roles)
+  if type(roles) ~= "table" then
+    return nil
+  end
+  local list = {}
+  for _, key in ipairs(TRINKET_ROLE_ORDER) do
+    if roles[key] then
+      list[#list + 1] = TRINKET_ROLE_LABELS[key] or key
+    end
+  end
+  if #list == 0 then
+    return nil
+  end
+  return table.concat(list, ", ")
+end
+
+local function GetPlayerInfoForVote(self, session, playerKey)
+  if not playerKey or not self then
+    return nil, nil, nil, nil
+  end
+  local provider = session and session.isTest and TestProvider or LiveProvider
+  local player = provider and provider.GetPlayer and provider:GetPlayer(playerKey) or nil
+  local classFile = player and (player.classFile or player.classFileName or player.classToken or player.class) or nil
+  local specName = player and (player.specName or player.spec) or nil
+  if not classFile and session and session.expectedVoterClasses then
+    classFile = session.expectedVoterClasses[playerKey]
+  end
+  return classFile, specName, player, provider
+end
+
+function GLD:BuildRollRestrictionSnapshot(session)
+  if not session then
+    return nil
+  end
+  local itemId = session.itemID
+  if not itemId and session.itemLink and C_Item and C_Item.GetItemInfoInstant then
+    itemId = select(1, C_Item.GetItemInfoInstant(session.itemLink))
+  end
+  local roles = itemId and self.GetTrinketRoleRestriction and self:GetTrinketRoleRestriction(itemId) or nil
+  if roles then
+    return {
+      trinketRoles = roles,
+      itemId = itemId,
+    }
+  end
+  return nil
+end
+
+function GLD:GetEligibilityReasonText(reason, session)
+  if not reason or reason == "" then
+    return nil
+  end
+  if reason == "need_disabled" then
+    return "Not allowed for this roll."
+  end
+  if reason == "greed_disabled" then
+    return "Not allowed for this roll."
+  end
+  if reason == "transmog_disabled" then
+    return "Not allowed for this roll."
+  end
+  if reason == "ineligible_trinket_role" then
+    local roles = session and session.restrictionSnapshot and session.restrictionSnapshot.trinketRoles or nil
+    local roleText = FormatTrinketRoleList(roles)
+    if roleText then
+      return "Trinket reserved for " .. roleText .. "."
+    end
+    return "Trinket role restriction."
+  end
+  if reason == "ineligible_tier" then
+    return "Tier token not for your class."
+  end
+  if reason == "ineligible_class_restriction" then
+    return "Class restricted item."
+  end
+  if reason == "ineligible_armor" then
+    return "Cannot equip this armor type."
+  end
+  if reason == "ineligible_weapon" then
+    return "Cannot equip this weapon type."
+  end
+  if reason == "ineligible_shield" then
+    return "Cannot equip a shield."
+  end
+  if reason == "ineligible_item_type" then
+    return "Cannot use this item type."
+  end
+  if reason == "item_data_missing" then
+    return "Item data still loading."
+  end
+  if reason == "eligibility_pending" then
+    return "Determining eligibility..."
+  end
+  return "Ineligible for this vote."
+end
+
+function GLD:GetEligibilityForVote(session, playerKey, voteType, opts)
+  if not session or not voteType then
+    return true, nil, nil
+  end
+  if voteType == "PASS" then
+    return true, nil, nil
+  end
+
+  local requireData = opts and opts.requireData == true
+
+  if voteType ~= "NEED" then
+    if opts and opts.log and self.Debug then
+      local _, _, player, provider = GetPlayerInfoForVote(self, session, playerKey)
+      local name = provider and provider.GetPlayerName and provider:GetPlayerName(playerKey) or (player and player.name) or playerKey or "Unknown"
+      self:Debug(
+        "Eligibility result: rollID="
+          .. tostring(session.rollID)
+          .. " vote="
+          .. tostring(voteType)
+          .. " player="
+          .. tostring(name)
+          .. " eligible=true"
+      )
+    end
+    return true, nil, nil
+  end
+
+  local itemRef = session.itemLink or session.itemID or session.itemName
+  if not itemRef then
+    if requireData then
+      return false, "eligibility_pending", "GREED"
+    end
+    return true, nil, nil
+  end
+
+  local classFile, specName, player, provider = GetPlayerInfoForVote(self, session, playerKey)
+  if not classFile or classFile == "" then
+    if opts and opts.log and self.Debug then
+      local name = provider and provider.GetPlayerName and provider:GetPlayerName(playerKey) or playerKey or "Unknown"
+      self:Debug("Eligibility skipped: missing class for " .. tostring(name))
+    end
+    if requireData then
+      return false, "eligibility_pending", "GREED"
+    end
+    return true, nil, nil
+  end
+  classFile = tostring(classFile):upper()
+
+  local context = nil
+  if session.restrictionSnapshot and session.restrictionSnapshot.trinketRoles then
+    context = { trinketRoles = session.restrictionSnapshot.trinketRoles }
+  end
+  if requireData and (not specName or specName == "") then
+    local isTrinket = context and context.trinketRoles
+    if not isTrinket and self.IsItemInfoTrinket then
+      isTrinket = self:IsItemInfoTrinket(itemRef)
+    end
+    if not isTrinket and self.IsKnownTrinket then
+      isTrinket = self:IsKnownTrinket(itemRef)
+    end
+    if isTrinket then
+      return false, "eligibility_pending", "GREED"
+    end
+  end
+
+  local ok, reason = self:IsEligibleForNeed(classFile, itemRef, specName, context)
+  if not ok and reason == "item_data_missing" then
+    if opts and opts.log and self.Debug then
+      self:Debug("Eligibility skipped: item data missing for rollID=" .. tostring(session.rollID))
+    end
+    if requireData then
+      return false, "eligibility_pending", "GREED"
+    end
+    return true, nil, nil
+  end
+
+  if opts and opts.log and self.Debug then
+    local name = provider and provider.GetPlayerName and provider:GetPlayerName(playerKey) or playerKey or "Unknown"
+    local roleKey = nil
+    local isTrinket = session.restrictionSnapshot and session.restrictionSnapshot.trinketRoles or nil
+    if not isTrinket and self.IsItemInfoTrinket then
+      isTrinket = self:IsItemInfoTrinket(itemRef)
+    end
+    if self.GetTrinketRoleKey and isTrinket then
+      roleKey = self:GetTrinketRoleKey(classFile, specName)
+    end
+    if roleKey then
+      self:Debug("Eligibility role: " .. tostring(name) .. " -> " .. tostring(roleKey))
+    end
+    self:Debug(
+      "Eligibility result: rollID="
+        .. tostring(session.rollID)
+        .. " vote="
+        .. tostring(voteType)
+        .. " player="
+        .. tostring(name)
+        .. " eligible="
+        .. tostring(ok)
+        .. (reason and (" reason=" .. tostring(reason)) or "")
+    )
+  end
+
+  return ok, reason, "GREED"
+end
+
 function GLD:FindPlayerKeyByName(name, realm)
   if not name then
     return nil
@@ -418,6 +640,123 @@ function GLD:GetRollCandidateKey(sender)
   return sender
 end
 
+local function IsBlizzFlagKnown(flag)
+  return flag == true or flag == false
+end
+
+local function HighlightRoll(roll)
+  if roll == nil then
+    return nil
+  end
+  return "|cffffd200" .. tostring(roll) .. "|r"
+end
+
+function GLD:BuildResultVoteEntries(result, voteType)
+  local entries = {}
+  if not result or not voteType or not result.votes then
+    return entries
+  end
+  local details = result.voteDetails or {}
+  for name, vote in pairs(result.votes) do
+    if vote == voteType then
+      local detail = details[name]
+      entries[#entries + 1] = {
+        name = name,
+        roll = detail and detail.roll or nil,
+        voteOriginal = detail and detail.voteOriginal or nil,
+        voteEffective = detail and detail.voteEffective or nil,
+        reason = detail and detail.reason or nil,
+        reasonText = detail and detail.reasonText or nil,
+      }
+    end
+  end
+  table.sort(entries, function(a, b)
+    return tostring(a.name) < tostring(b.name)
+  end)
+  return entries
+end
+
+function GLD:GetWinnerRoll(result)
+  if not result then
+    return nil
+  end
+  if result.winningRoll ~= nil then
+    return result.winningRoll
+  end
+  local details = result.voteDetails or {}
+  local winner = result.winnerName
+  local entry = winner and details[winner] or nil
+  return entry and entry.roll or nil
+end
+
+function GLD:ResolveInstructionOverride(result)
+  if not result or result.winnerVote ~= "GREED" then
+    return nil, nil, nil
+  end
+  if not IsBlizzFlagKnown(result.blizzNeedAllowed) or not IsBlizzFlagKnown(result.blizzGreedAllowed) then
+    return nil, nil, nil
+  end
+  if result.blizzNeedAllowed == false and result.blizzGreedAllowed == false and result.blizzTransmogAllowed == true then
+    return "ROLL_TRANSMOG_REASON_BLIZZARD_GREED_DISABLED", "TRANSMOG", "Blizzard doesn't allow Greed here; please roll TRANSMOG."
+  end
+  return nil, nil, nil
+end
+
+function GLD:BuildRollResultSummaryLine(result)
+  if not result then
+    return nil
+  end
+  local winnerName = result.winnerName or "None"
+  local winnerVote = result.winnerVote
+  if winnerVote == "GREED" or winnerVote == "TRANSMOG" then
+    local entries = self:BuildResultVoteEntries(result, winnerVote)
+    local parts = {}
+    for _, entry in ipairs(entries) do
+      local label = entry.name or "?"
+      if entry.roll ~= nil then
+        label = label .. " " .. tostring(entry.roll)
+      end
+      parts[#parts + 1] = label
+    end
+    local listText = #parts > 0 and table.concat(parts, ", ") or "none"
+    local winnerRoll = self:GetWinnerRoll(result)
+    local winnerSuffix = winnerRoll ~= nil and (" (" .. HighlightRoll(winnerRoll) .. ")") or ""
+    return tostring(winnerVote) .. " rolls: " .. listText .. " -> Winner: " .. tostring(winnerName) .. winnerSuffix
+  end
+  if winnerVote == "NEED" then
+    local entries = self:BuildResultVoteEntries(result, "NEED")
+    local parts = {}
+    for _, entry in ipairs(entries) do
+      parts[#parts + 1] = entry.name or "?"
+    end
+    local listText = #parts > 0 and table.concat(parts, ", ") or "none"
+    return "NEED eligible: " .. listText .. " -> Winner: " .. tostring(winnerName) .. " (queue priority)"
+  end
+  return "Winner: " .. tostring(winnerName)
+end
+
+function GLD:BuildRollResultInstructionLine(result)
+  if not result or not result.instructionText then
+    return nil
+  end
+  local winnerName = result.winnerName or "None"
+  local voteText = result.winnerVote or "ROLL"
+  return "Winner via " .. tostring(voteText) .. ": " .. tostring(winnerName) .. " - " .. tostring(result.instructionText)
+end
+
+function GLD:BuildRollResultLines(result)
+  local lines = {}
+  local summary = self:BuildRollResultSummaryLine(result)
+  if summary then
+    lines[#lines + 1] = summary
+  end
+  local instruction = self:BuildRollResultInstructionLine(result)
+  if instruction then
+    lines[#lines + 1] = instruction
+  end
+  return lines
+end
+
 function GLD:AnnounceRollResult(result)
   if not result then
     return
@@ -426,9 +765,10 @@ function GLD:AnnounceRollResult(result)
     return
   end
   local channel = "RAID"
-  local winnerName = result.winnerName or "None"
   local itemText = result.itemLink or result.itemName or "Item"
-  local msg = string.format("GLD Result: %s -> %s", itemText, winnerName)
+  local lines = self:BuildRollResultLines(result)
+  local detail = #lines > 0 and table.concat(lines, " | ") or ("Winner: " .. tostring(result.winnerName or "None"))
+  local msg = "GLD Result: " .. tostring(itemText) .. " - " .. detail
   SendChatMessage(msg, channel)
 end
 
@@ -454,6 +794,58 @@ function GLD:ResolveRollWinner(session)
   return nil
 end
 
+function GLD:LogItemWonAudit(session, winnerKey, winnerVote, provider)
+  if not self.LogAuditEvent or not session or session.isTest then
+    return
+  end
+  local targetName = "Unclaimed"
+  local isGuest = false
+  local classFile = nil
+  local specName = nil
+  if winnerKey and provider then
+    local player = provider.GetPlayer and provider:GetPlayer(winnerKey) or nil
+    if player then
+      targetName = player.name or targetName
+      if self.IsGuestEntry then
+        isGuest = self:IsGuestEntry(player)
+      end
+      classFile = player.classFile or player.classFileName or player.class
+      specName = player.specName or player.spec
+    else
+      local name = provider.GetPlayerName and provider:GetPlayerName(winnerKey) or winnerKey
+      if name then
+        targetName = name
+      end
+    end
+  end
+  local details = {
+    itemID = session.itemID,
+    itemName = session.itemName,
+    voteType = winnerVote,
+  }
+  if not details.itemID and session.itemLink then
+    if C_Item and C_Item.GetItemInfoInstant then
+      details.itemID = select(1, C_Item.GetItemInfoInstant(session.itemLink))
+    elseif GetItemInfoInstant then
+      details.itemID = select(1, GetItemInfoInstant(session.itemLink))
+    end
+  end
+  if not details.itemName and session.itemLink then
+    details.itemName = session.itemLink
+  end
+  local baseName = targetName
+  if type(baseName) == "string" and not baseName:match("^Player%-") then
+    baseName = NS and NS.GetPlayerBaseName and NS:GetPlayerBaseName(baseName) or baseName
+  end
+  self:LogAuditEvent("ITEM_WON", {
+    target = baseName,
+    isGuest = isGuest,
+    class = classFile,
+    spec = specName,
+    details = details,
+  })
+end
+
 local function NormalizeVoteKey(provider, key)
   if provider and provider.GetPlayerName then
     local name = provider:GetPlayerName(key)
@@ -477,6 +869,25 @@ local function SnapshotVotes(votes, provider)
     end
   end
   return snapshot, counts
+end
+
+local function SnapshotVoteDetails(details, provider)
+  if not details then
+    return nil
+  end
+  local snapshot = {}
+  for key, entry in pairs(details or {}) do
+    local displayKey = NormalizeVoteKey(provider, key)
+    snapshot[displayKey] = {
+      voteOriginal = entry.voteOriginal,
+      voteEffective = entry.voteEffective,
+      reason = entry.reason,
+      reasonText = entry.reasonText,
+      roll = entry.roll,
+      blizzVote = entry.blizzVote,
+    }
+  end
+  return snapshot
 end
 
 local function BuildMissingAtLock(expectedVoters, votes, provider)
@@ -560,6 +971,45 @@ function GLD:ApplyWinnerMove(winnerKey, voteType)
   return mode
 end
 
+function GLD:CaptureBlizzardRollData(session)
+  if not session or not session.itemLink then
+    return nil
+  end
+  if not C_LootHistory or not C_LootHistory.GetItem or not C_LootHistory.GetPlayerInfo then
+    return nil
+  end
+  local numItems = C_LootHistory.GetNumItems and C_LootHistory.GetNumItems() or 0
+  if numItems <= 0 then
+    return nil
+  end
+  local rollMap = nil
+  for itemIndex = 1, numItems do
+    local _, itemLink, _, _, numPlayers = C_LootHistory.GetItem(itemIndex)
+    if itemLink and itemLink == session.itemLink and numPlayers and numPlayers > 0 then
+      for playerIndex = 1, numPlayers do
+        local name, _, rollType, roll = C_LootHistory.GetPlayerInfo(itemIndex, playerIndex)
+        local key = name and self.GetRollCandidateKey and self:GetRollCandidateKey(name) or nil
+        if key and session.votes and session.votes[key] then
+          rollMap = rollMap or {}
+          rollMap[key] = roll
+          session.voteDetails = session.voteDetails or {}
+          local detail = session.voteDetails[key] or {
+            voteOriginal = session.votes[key],
+            voteEffective = session.votes[key],
+          }
+          detail.roll = roll
+          if rollType and RollTypeToVote then
+            detail.blizzVote = RollTypeToVote(rollType)
+          end
+          session.voteDetails[key] = detail
+        end
+      end
+      break
+    end
+  end
+  return rollMap
+end
+
 function GLD:FinalizeRoll(session)
   if not session or session.locked then
     return
@@ -567,6 +1017,7 @@ function GLD:FinalizeRoll(session)
   if not session.isTest and not self:IsAuthority() then
     return
   end
+  local rollMap = self:CaptureBlizzardRollData(session)
   local winnerKey = self:ResolveRollWinner(session)
   if self:IsDebugEnabled() then
     local totalVotes = CountVotes(session.votes)
@@ -593,10 +1044,37 @@ function GLD:FinalizeRoll(session)
   if winnerPlayer and winnerPlayer.realm and winnerPlayer.realm ~= "" then
     winnerFull = winnerPlayer.name .. "-" .. winnerPlayer.realm
   end
+  if not winnerKey then
+    winnerName = "Unclaimed"
+    winnerFull = "Unclaimed"
+  end
   local winnerVote = session.votes and winnerKey and session.votes[winnerKey] or nil
+  local winnerRoll = rollMap and winnerKey and rollMap[winnerKey] or nil
+  if winnerRoll == nil and winnerKey and session.voteDetails and session.voteDetails[winnerKey] then
+    winnerRoll = session.voteDetails[winnerKey].roll
+  end
+  local winnerShortName = winnerName
+  if winnerFull and winnerFull ~= "" and NS and NS.SplitNameRealm then
+    local short = select(1, NS:SplitNameRealm(winnerFull))
+    if short and short ~= "" then
+      winnerShortName = short
+    end
+  end
+  if not winnerKey then
+    winnerShortName = "Unclaimed"
+  end
+  local winnerClassToken = winnerPlayer
+    and (winnerPlayer.classToken or winnerPlayer.classFile or winnerPlayer.classFileName or winnerPlayer.class)
+    or nil
+  if winnerClassToken then
+    winnerClassToken = tostring(winnerClassToken):upper()
+  end
+  local winnerIsGuest = winnerPlayer and self.IsGuestEntry and self:IsGuestEntry(winnerPlayer) or false
+  local winnerIsGuest = winnerPlayer and self.IsGuestEntry and self:IsGuestEntry(winnerPlayer) or false
 
   local resolvedAt = GetServerTime()
   local voteSnapshot, voteCounts = SnapshotVotes(session.votes, provider)
+  local voteDetails = SnapshotVoteDetails(session.voteDetails, provider)
   if self:IsDebugEnabled() then
     self:Debug(
       "Finalize roll votes: rollID="
@@ -621,13 +1099,31 @@ function GLD:FinalizeRoll(session)
     itemName = session.itemName,
     winnerKey = winnerKey,
     winnerName = winnerFull,
+    winnerShortName = winnerShortName,
+    winnerClassToken = winnerClassToken,
+    winnerIsGuest = winnerIsGuest,
     votes = voteSnapshot,
     voteCounts = voteCounts,
+    voteDetails = voteDetails,
     missingAtLock = missingAtLock,
     startedAt = startedAt,
     resolvedAt = resolvedAt,
     resolvedBy = resolvedBy,
+    winnerVote = winnerVote,
+    winningRoll = winnerRoll,
+    blizzNeedAllowed = session.blizzNeedAllowed,
+    blizzGreedAllowed = session.blizzGreedAllowed,
+    blizzTransmogAllowed = session.blizzTransmogAllowed,
   }
+
+  self:LogItemWonAudit(session, winnerKey, winnerVote, provider)
+
+  local overrideId, instructionVote, instructionText = self:ResolveInstructionOverride(result)
+  if overrideId then
+    result.instructionOverride = overrideId
+    result.instructionVote = instructionVote
+    result.instructionText = instructionText
+  end
 
   session.locked = true
   session.result = result
@@ -712,6 +1208,27 @@ function GLD:ApplyAdminOverride(session, winnerKey)
     winnerFull = "Unclaimed"
   end
   local winnerVote = session.votes and winnerKey and session.votes[winnerKey] or nil
+  local rollMap = self:CaptureBlizzardRollData(session)
+  local winnerRoll = rollMap and winnerKey and rollMap[winnerKey] or nil
+  if winnerRoll == nil and winnerKey and session.voteDetails and session.voteDetails[winnerKey] then
+    winnerRoll = session.voteDetails[winnerKey].roll
+  end
+  local winnerShortName = winnerName
+  if winnerFull and winnerFull ~= "" and NS and NS.SplitNameRealm then
+    local short = select(1, NS:SplitNameRealm(winnerFull))
+    if short and short ~= "" then
+      winnerShortName = short
+    end
+  end
+  if isPass then
+    winnerShortName = "Unclaimed"
+  end
+  local winnerClassToken = winnerPlayer
+    and (winnerPlayer.classToken or winnerPlayer.classFile or winnerPlayer.classFileName or winnerPlayer.class)
+    or nil
+  if winnerClassToken then
+    winnerClassToken = tostring(winnerClassToken):upper()
+  end
 
   if winnerKey and LootEngine and LootEngine.CommitAward then
     LootEngine:CommitAward(winnerKey, session, provider)
@@ -719,6 +1236,7 @@ function GLD:ApplyAdminOverride(session, winnerKey)
 
   local resolvedAt = GetServerTime()
   local voteSnapshot, voteCounts = SnapshotVotes(session.votes, provider)
+  local voteDetails = SnapshotVoteDetails(session.voteDetails, provider)
   local missingAtLock = BuildMissingAtLock(session.expectedVoters, voteSnapshot, provider)
   local startedAt = session.createdAt or resolvedAt
   local authorityGUID = self:GetAuthorityGUID()
@@ -730,8 +1248,12 @@ function GLD:ApplyAdminOverride(session, winnerKey)
     itemName = session.itemName,
     winnerKey = winnerKey,
     winnerName = winnerFull,
+    winnerShortName = winnerShortName,
+    winnerClassToken = winnerClassToken,
+    winnerIsGuest = winnerIsGuest,
     votes = voteSnapshot,
     voteCounts = voteCounts,
+    voteDetails = voteDetails,
     missingAtLock = missingAtLock,
     startedAt = startedAt,
     resolvedAt = resolvedAt,
@@ -739,7 +1261,21 @@ function GLD:ApplyAdminOverride(session, winnerKey)
     overrideBy = overrideBy,
     authorityGUID = authorityGUID,
     authorityName = authorityName,
+    winnerVote = winnerVote,
+    winningRoll = winnerRoll,
+    blizzNeedAllowed = session.blizzNeedAllowed,
+    blizzGreedAllowed = session.blizzGreedAllowed,
+    blizzTransmogAllowed = session.blizzTransmogAllowed,
   }
+
+  self:LogItemWonAudit(session, winnerKey, winnerVote, provider)
+
+  local overrideId, instructionVote, instructionText = self:ResolveInstructionOverride(result)
+  if overrideId then
+    result.instructionOverride = overrideId
+    result.instructionVote = instructionVote
+    result.instructionText = instructionText
+  end
 
   session.locked = true
   session.result = result
@@ -824,13 +1360,23 @@ function GLD:RecordTestSessionLoot(result, session)
     itemName = result.itemName,
     winnerKey = result.winnerKey,
     winnerName = result.winnerName,
+    winnerIsGuest = result.winnerIsGuest,
     votes = result.votes,
     voteCounts = result.voteCounts,
+    voteDetails = result.voteDetails,
     missingAtLock = result.missingAtLock,
     startedAt = result.startedAt,
     resolvedAt = result.resolvedAt or GetServerTime(),
     resolvedBy = result.resolvedBy or "NORMAL",
     overrideBy = result.overrideBy,
+    winnerVote = result.winnerVote,
+    winningRoll = result.winningRoll,
+    instructionOverride = result.instructionOverride,
+    instructionVote = result.instructionVote,
+    instructionText = result.instructionText,
+    blizzNeedAllowed = result.blizzNeedAllowed,
+    blizzGreedAllowed = result.blizzGreedAllowed,
+    blizzTransmogAllowed = result.blizzTransmogAllowed,
   }
 
   if self:IsDebugEnabled() then
@@ -884,13 +1430,23 @@ function GLD:RecordSessionLoot(result, session)
     itemName = result.itemName,
     winnerKey = result.winnerKey,
     winnerName = result.winnerName,
+    winnerIsGuest = result.winnerIsGuest,
     votes = result.votes,
     voteCounts = result.voteCounts,
+    voteDetails = result.voteDetails,
     missingAtLock = result.missingAtLock,
     startedAt = result.startedAt,
     resolvedAt = result.resolvedAt or GetServerTime(),
     resolvedBy = result.resolvedBy or "NORMAL",
     overrideBy = result.overrideBy,
+    winnerVote = result.winnerVote,
+    winningRoll = result.winningRoll,
+    instructionOverride = result.instructionOverride,
+    instructionVote = result.instructionVote,
+    instructionText = result.instructionText,
+    blizzNeedAllowed = result.blizzNeedAllowed,
+    blizzGreedAllowed = result.blizzGreedAllowed,
+    blizzTransmogAllowed = result.blizzTransmogAllowed,
   }
 
   if self:IsDebugEnabled() then
@@ -1034,11 +1590,28 @@ function GLD:OnStartLootRoll(event, rollID, rollTime, lootHandle)
     canNeed = canNeed,
     canGreed = canGreed,
     canTransmog = canTransmog,
+    blizzNeedAllowed = canNeed,
+    blizzGreedAllowed = canGreed,
+    blizzTransmogAllowed = canTransmog,
     votes = {},
     expectedVoters = self:BuildExpectedVoters(),
     createdAt = createdAt,
   }
+  session.restrictionSnapshot = self:BuildRollRestrictionSnapshot(session)
   self.activeRolls[rollKey] = session
+
+  if self:IsDebugEnabled() then
+    local snapshot = session.restrictionSnapshot
+    local roleText = snapshot and FormatTrinketRoleList(snapshot.trinketRoles) or "none"
+    self:Debug(
+      "Roll restriction snapshot: rollID="
+        .. tostring(session.rollID)
+        .. " item="
+        .. tostring(session.itemLink or session.itemName or "Unknown")
+        .. " trinketRoles="
+        .. tostring(roleText)
+    )
+  end
 
   if self:IsDebugEnabled() then
     self:Debug("Roll started detected: rollID=" .. tostring(rollID) .. " rollKey=" .. tostring(rollKey) .. " item=" .. tostring(link or name or "Unknown"))
@@ -1106,10 +1679,22 @@ function GLD:OnLootHistoryRollChanged()
       if sessions then
         for _, session in ipairs(sessions) do
           for playerIndex = 1, numPlayers do
-            local name, class, rollType = C_LootHistory.GetPlayerInfo(itemIndex, playerIndex)
+            local name, class, rollType, roll = C_LootHistory.GetPlayerInfo(itemIndex, playerIndex)
             local declaredKey = self:GetRollCandidateKey(name)
             local declaredVote = declaredKey and session.votes[declaredKey] or nil
             local actualVote = RollTypeToVote(rollType)
+            if declaredKey and declaredVote and roll ~= nil then
+              session.voteDetails = session.voteDetails or {}
+              local detail = session.voteDetails[declaredKey] or {
+                voteOriginal = declaredVote,
+                voteEffective = declaredVote,
+              }
+              detail.roll = roll
+              if rollType then
+                detail.blizzVote = RollTypeToVote(rollType)
+              end
+              session.voteDetails[declaredKey] = detail
+            end
             if declaredVote and actualVote and declaredVote ~= actualVote then
               self:NoteMismatch(session, name, declaredVote, actualVote)
             end

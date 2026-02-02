@@ -138,11 +138,17 @@ function GLD:InitComms()
   self.commHandlers[NS.MSG.ROLL_SESSION_REQUEST] = function(sender, payload)
     self:HandleRollSessionRequest(sender, payload)
   end
+  self.commHandlers[NS.MSG.VOTE_CONVERTED] = function(sender, payload)
+    self:HandleVoteConverted(sender, payload)
+  end
   self.commHandlers[NS.MSG.ROLL_MISMATCH] = function(sender, payload)
     self:HandleRollMismatch(sender, payload)
   end
   self.commHandlers[NS.MSG.FORCE_PENDING] = function(sender, payload)
     self:HandleForcePending(sender, payload)
+  end
+  self.commHandlers[NS.MSG.SESSION_STATE] = function(sender, payload)
+    self:HandleSessionState(sender, payload)
   end
   self.commHandlers[NS.MSG.REV_CHECK] = function(sender, payload)
     self:HandleRevisionCheck(sender, payload)
@@ -204,6 +210,7 @@ function GLD:HandleStateSnapshot(sender, payload)
   end
   if payload.roster then
     self.shadow.roster = payload.roster
+    self.shadow.rosterReceived = true
     if self.UpdateShadowMyFromRoster then
       self:UpdateShadowMyFromRoster(self.shadow.roster)
     end
@@ -222,6 +229,7 @@ function GLD:HandleStateSnapshot(sender, payload)
     local rosterCount = (self.shadow and self.shadow.roster and #self.shadow.roster) or 0
     local my = self.shadow and self.shadow.my or nil
     local rev = self.shadow and self.shadow.meta and self.shadow.meta.revision or "nil"
+    local sessionActive = self.shadow and self.shadow.sessionActive == true
     self:Debug(
       "Snapshot received: rosterSource=shadow.roster rosterCount="
         .. tostring(rosterCount)
@@ -231,6 +239,8 @@ function GLD:HandleStateSnapshot(sender, payload)
         .. tostring(my and my.savedPos or "nil")
         .. " revision="
         .. tostring(rev)
+        .. " sessionActive="
+        .. tostring(sessionActive)
     )
   end
   if self.UI then
@@ -254,6 +264,7 @@ function GLD:HandleDelta(sender, payload)
   end
   if payload.roster then
     self.shadow.roster = payload.roster
+    self.shadow.rosterReceived = true
     if self.UpdateShadowMyFromRoster then
       self:UpdateShadowMyFromRoster(self.shadow.roster)
     end
@@ -267,6 +278,37 @@ function GLD:HandleDelta(sender, payload)
   if payload.lastChanged ~= nil then
     self.shadow.meta = self.shadow.meta or {}
     self.shadow.meta.lastChanged = payload.lastChanged
+  end
+  if self.UI then
+    self.UI:RefreshMain()
+  end
+end
+
+function GLD:HandleSessionState(sender, payload)
+  if not payload then
+    return
+  end
+  if self.IsAuthorizedSender then
+    local ok = self:IsAuthorizedSender(sender, payload.authorityGUID, payload.authorityName)
+    if not ok then
+      self:Debug("Blocked unauthorized session state from " .. tostring(sender))
+      return
+    end
+  end
+  if payload.revision ~= nil or payload.lastChanged ~= nil then
+    self.shadow.meta = self.shadow.meta or {}
+    if payload.revision ~= nil then
+      self.shadow.meta.revision = payload.revision
+    end
+    if payload.lastChanged ~= nil then
+      self.shadow.meta.lastChanged = payload.lastChanged
+    end
+  end
+  if payload.sessionActive ~= nil then
+    self.shadow.sessionActive = payload.sessionActive == true
+  end
+  if payload.sessionActive == false and self.ClearSessionAuthority then
+    self:ClearSessionAuthority()
   end
   if self.UI then
     self.UI:RefreshMain()
@@ -353,6 +395,19 @@ function GLD:BuildSnapshot()
     }
   end
 
+function GLD:BuildSessionStatePayload()
+  local sessionActive = self.db and self.db.session and self.db.session.active == true
+  local revision = self.db and self.db.meta and self.db.meta.revision or 0
+  local lastChanged = self.db and self.db.meta and self.db.meta.lastChanged or 0
+  return {
+    sessionActive = sessionActive,
+    revision = revision,
+    lastChanged = lastChanged,
+    authorityGUID = self:GetAuthorityGUID(),
+    authorityName = self:GetAuthorityName(),
+  }
+end
+
 function GLD:BroadcastSnapshot(force)
   if not force and not self:IsAuthority() then
     return
@@ -362,6 +417,22 @@ function GLD:BroadcastSnapshot(force)
   end
   local snapshot = self:BuildSnapshot()
   self:SendCommMessageSafe(NS.MSG.STATE_SNAPSHOT, snapshot, "RAID")
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    local revision = self.db and self.db.meta and self.db.meta.revision or 0
+    local rosterCount = snapshot and snapshot.roster and #snapshot.roster or 0
+    self:Debug("Snapshot broadcast: revision=" .. tostring(revision) .. " rosterCount=" .. tostring(rosterCount))
+  end
+end
+
+function GLD:BroadcastSessionState(force)
+  if not force and not self:IsAuthority() then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  local payload = self:BuildSessionStatePayload()
+  self:SendCommMessageSafe(NS.MSG.SESSION_STATE, payload, "RAID")
 end
 
 function GLD:SendRevisionCheck()
@@ -417,11 +488,19 @@ function GLD:RequestAdminAction(action)
   end
   if self:IsAuthority() then
     if action == "START_SESSION" and self.StartSession then
-      self:StartSession()
+      if self.PromptStartSession then
+        self:PromptStartSession()
+      else
+        self:StartSession()
+      end
       return true
     end
     if action == "END_SESSION" and self.EndSession then
-      self:EndSession()
+      if self.PromptEndSession then
+        self:PromptEndSession()
+      else
+        self:EndSession()
+      end
       return true
     end
     return false
@@ -496,13 +575,17 @@ function GLD:HandleAdminRequest(sender, payload)
   end
   local action = payload.action
   if action == "START_SESSION" then
-    if self.StartSession then
+    if self.PromptStartSession then
+      self:PromptStartSession()
+    elseif self.StartSession then
       self:StartSession()
     end
     return
   end
   if action == "END_SESSION" then
-    if self.EndSession then
+    if self.PromptEndSession then
+      self:PromptEndSession()
+    elseif self.EndSession then
       self:EndSession()
     end
     return
@@ -624,6 +707,12 @@ function GLD:HandleRollSession(sender, payload)
   session.itemIcon = payload.itemIcon or session.itemIcon
   session.quality = payload.quality or session.quality
   session.count = payload.count or session.count
+  if payload.restrictionSnapshot then
+    session.restrictionSnapshot = {}
+    for k, v in pairs(payload.restrictionSnapshot) do
+      session.restrictionSnapshot[k] = v
+    end
+  end
   if payload.canNeed ~= nil then
     session.canNeed = payload.canNeed
   end
@@ -632,6 +721,15 @@ function GLD:HandleRollSession(sender, payload)
   end
   if payload.canTransmog ~= nil then
     session.canTransmog = payload.canTransmog
+  end
+  if payload.blizzNeedAllowed ~= nil then
+    session.blizzNeedAllowed = payload.blizzNeedAllowed
+  end
+  if payload.blizzGreedAllowed ~= nil then
+    session.blizzGreedAllowed = payload.blizzGreedAllowed
+  end
+  if payload.blizzTransmogAllowed ~= nil then
+    session.blizzTransmogAllowed = payload.blizzTransmogAllowed
   end
   if payload.expectedVoters then
     session.expectedVoters = payload.expectedVoters
@@ -821,8 +919,80 @@ function GLD:HandleRollVote(sender, payload)
     return
   end
 
+  local originalVote = payload.voteOriginal or payload.vote
+  local effectiveVote = payload.voteEffective or payload.vote
+  local reason = payload.reason
+  local reasonText = payload.reasonText
+  if isAuthority and self.GetEligibilityForVote then
+    local eligible, reasonCode = self:GetEligibilityForVote(session, key, originalVote, { log = true })
+    if not eligible then
+      reason = reasonCode
+      if originalVote == "NEED" then
+        effectiveVote = "GREED"
+        local greedEligible, greedReason = self:GetEligibilityForVote(session, key, "GREED")
+        if not greedEligible then
+          effectiveVote = "PASS"
+          if not reason then
+            reason = greedReason
+          end
+        end
+      elseif originalVote == "GREED" or originalVote == "TRANSMOG" then
+        effectiveVote = "PASS"
+      else
+        effectiveVote = "PASS"
+      end
+    end
+  end
+
   session.votes = session.votes or {}
-  session.votes[key] = payload.vote
+  session.votes[key] = effectiveVote
+  session.voteDetails = session.voteDetails or {}
+  session.voteDetails[key] = {
+    voteOriginal = originalVote,
+    voteEffective = effectiveVote,
+    reason = reason,
+    reasonText = reasonText,
+  }
+  if isAuthority and effectiveVote ~= originalVote then
+    reasonText = self.GetEligibilityReasonText and self:GetEligibilityReasonText(reason, session) or nil
+    session.voteDetails[key].reasonText = reasonText
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug(
+        "Vote converted: rollID="
+          .. tostring(rollID)
+          .. " voter="
+          .. tostring(key)
+          .. " "
+          .. tostring(originalVote)
+          .. "->"
+          .. tostring(effectiveVote)
+          .. (reason and (" reason=" .. tostring(reason)) or "")
+      )
+    end
+    local msg = "Your " .. tostring(originalVote) .. " was converted to " .. tostring(effectiveVote)
+    if reasonText then
+      msg = msg .. " (reason: " .. tostring(reasonText) .. ")"
+    end
+    local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
+    if localKey and localKey == key then
+      self:Print(msg)
+    else
+      local target = self.GetWhisperTargetForPlayerKey and self:GetWhisperTargetForPlayerKey(key) or nil
+      if target and target ~= "" then
+        self:SendCommMessageSafe(NS.MSG.VOTE_CONVERTED, {
+          rollID = rollID,
+          rollKey = session.rollKey or rollKey,
+          voteOriginal = originalVote,
+          voteEffective = effectiveVote,
+          reason = reason,
+          reasonText = reasonText,
+          voterKey = key,
+        }, "WHISPER", target)
+      else
+        self:Print(msg)
+      end
+    end
+  end
   if debugEnabled then
     self:Debug(
       "Vote received: rollID="
@@ -830,7 +1000,7 @@ function GLD:HandleRollVote(sender, payload)
         .. " voter="
         .. tostring(key)
         .. " vote="
-        .. tostring(payload.vote)
+        .. tostring(effectiveVote)
         .. " sender="
         .. tostring(sender)
         .. " broadcast="
@@ -844,7 +1014,11 @@ function GLD:HandleRollVote(sender, payload)
       self:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
         rollID = rollID,
         rollKey = session.rollKey or rollKey,
-        vote = payload.vote,
+        vote = effectiveVote,
+        voteOriginal = originalVote,
+        voteEffective = effectiveVote,
+        reason = reason,
+        reasonText = reasonText,
         voterKey = key,
         broadcast = true,
       }, "RAID")
@@ -917,6 +1091,27 @@ function GLD:HandleRollResult(sender, payload)
   if self.UI and self.UI.RefreshPendingVotes then
     self.UI:RefreshPendingVotes()
   end
+end
+
+function GLD:HandleVoteConverted(sender, payload)
+  if not payload then
+    return
+  end
+  local originalVote = payload.voteOriginal or payload.vote
+  local effectiveVote = payload.voteEffective or payload.vote
+  if not originalVote or not effectiveVote then
+    return
+  end
+  local reasonText = payload.reasonText
+  if not reasonText and payload.reason and self.GetEligibilityReasonText then
+    local _, session = self:FindActiveRoll(payload.rollKey, payload.rollID)
+    reasonText = self:GetEligibilityReasonText(payload.reason, session)
+  end
+  local msg = "Your " .. tostring(originalVote) .. " was converted to " .. tostring(effectiveVote)
+  if reasonText then
+    msg = msg .. " (reason: " .. tostring(reasonText) .. ")"
+  end
+  self:Print(msg)
 end
 
 function GLD:HandleRollAck(sender, payload)

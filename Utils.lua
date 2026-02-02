@@ -539,13 +539,23 @@ function NS:GetPlayerBaseName(name)
 end
 
 function NS:GetPlayerDisplayName(name, isGuest)
+  if type(name) == "string" and name:match("^Player%-") then
+    return name
+  end
   local base = NS:GetPlayerBaseName(name)
   if not base or base == "" then
     base = name or "?"
   end
   base = tostring(base)
+  base = base:gsub("%s+$", "")
+  if not isGuest and type(name) == "string" then
+    local lowered = name:lower()
+    if lowered:match("%-guest$") or lowered:match("%s%-?%s*guest$") or lowered:match("%-|cffffffffguest|r$") then
+      isGuest = true
+    end
+  end
   if isGuest then
-    return base .. "-|cffffffffguest|r"
+    return base .. " - Guest"
   end
   return base
 end
@@ -645,6 +655,19 @@ function GLD:UpsertPlayerFromUnit(unit)
     if self.MarkDBChanged then
       self:MarkDBChanged("player_add")
     end
+    if self.LogAuditEvent then
+      local actor = self:GetUnitFullName("player") or UnitName("player") or "Unknown"
+      local isGuest = self.IsGuest and self:IsGuest(unit) or false
+      local specName = player.specName or player.spec
+      self:LogAuditEvent("ADD_MEMBER", {
+        actor = actor,
+        target = name or player.name,
+        isGuest = isGuest,
+        class = classFile,
+        spec = specName,
+        playerKey = key,
+      })
+    end
   else
     player.name = name or player.name
     player.realm = realm or player.realm
@@ -674,7 +697,9 @@ function GLD:AddGuestFromUnit(unit)
   end
   local classFile = select(2, UnitClass(unit))
   local player = self.db.players[key]
+  local isNew = false
   if not player then
+    isNew = true
     player = {
       name = name,
       realm = realm or GetRealmName(),
@@ -696,13 +721,20 @@ function GLD:AddGuestFromUnit(unit)
   end
   player.source = "guest"
 
-  self:EnsureQueuePositions()
-  if self.MarkDBChanged then
-    self:MarkDBChanged("guest_add")
+  if isNew and self.LogAuditEvent then
+    local actor = self:GetUnitFullName("player") or UnitName("player") or "Unknown"
+    local specName = player.specName or player.spec
+    self:LogAuditEvent("ADD_MEMBER", {
+      actor = actor,
+      target = name or player.name,
+      isGuest = true,
+      class = classFile,
+      spec = specName,
+      playerKey = key,
+    })
   end
-  self:BroadcastSnapshot()
-  if self.UI then
-    self.UI:RefreshMain()
+  if self.OnRosterChanged then
+    self:OnRosterChanged("guest_add")
   end
   self:Print("Added guest: " .. name)
 end
@@ -769,13 +801,8 @@ function GLD:RefreshFromGuildRoster()
     self.shadow.my.attendance = nil
 
     self:AutoMarkCurrentGroup()
-    self:EnsureQueuePositions()
-    if self.MarkDBChanged then
-      self:MarkDBChanged("guild_roster_refresh")
-    end
-    self:BroadcastSnapshot()
-    if self.UI then
-      self.UI:RefreshMain()
+    if self.OnRosterChanged then
+      self:OnRosterChanged("guild_roster_refresh")
     end
     self:Print("Guild roster loaded.")
   end

@@ -40,6 +40,7 @@ local function InitMasterDB()
   GuildLootDB.queue = GuildLootDB.queue or {}
   GuildLootDB.rollHistory = GuildLootDB.rollHistory or {}
   GuildLootDB.raidSessions = GuildLootDB.raidSessions or {}
+  GuildLootDB.auditLog = GuildLootDB.auditLog or {}
   GuildLootDB.testSessions = GuildLootDB.testSessions or {}
   GuildLootDB.testSession = GuildLootDB.testSession or {
     active = false,
@@ -53,6 +54,7 @@ local function InitMasterDB()
     currentBoss = nil,
     authorityGUID = nil,
     authorityName = nil,
+    zoneInstanceID = nil,
   }
 end
 
@@ -67,6 +69,7 @@ local function InitShadowDB()
     lastChanged = 0,
   }
   GuildLootShadow.lastSyncAt = GuildLootShadow.lastSyncAt or 0
+  GuildLootShadow.rosterReceived = GuildLootShadow.rosterReceived or false
   GuildLootShadow.sessionActive = GuildLootShadow.sessionActive or false
   GuildLootShadow.my = GuildLootShadow.my or {
     queuePos = nil,
@@ -98,6 +101,39 @@ function GLD:MarkDBChanged(reason)
     local label = reason and (" reason=" .. tostring(reason)) or ""
     self:Debug("DB revision bumped to " .. tostring(self.db.meta.revision) .. label)
   end
+end
+
+local AUDIT_LOG_MAX = 5000
+
+function GLD:AppendAuditLog(entry)
+  if not self.db then
+    return
+  end
+  self.db.auditLog = self.db.auditLog or {}
+  table.insert(self.db.auditLog, 1, entry)
+  if #self.db.auditLog > AUDIT_LOG_MAX then
+    for i = #self.db.auditLog, AUDIT_LOG_MAX + 1, -1 do
+      table.remove(self.db.auditLog, i)
+    end
+  end
+end
+
+function GLD:LogAuditEvent(eventType, data)
+  if not self.db then
+    return
+  end
+  local entry = {
+    timestamp = GetServerTime(),
+    type = eventType,
+    actor = data and data.actor or nil,
+    target = data and data.target or nil,
+    isGuest = data and data.isGuest or nil,
+    class = data and data.class or nil,
+    spec = data and data.spec or nil,
+    playerKey = data and (data.playerKey or data.rosterKey or data.key or data.id) or nil,
+    details = data and data.details or nil,
+  }
+  self:AppendAuditLog(entry)
 end
 
 function GLD:GetConfig()

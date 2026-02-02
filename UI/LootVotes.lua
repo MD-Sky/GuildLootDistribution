@@ -16,6 +16,32 @@ local PENDING_BORDER_ACTIVE = { 1, 0.82, 0, 1 }
 local PENDING_BORDER_DEFAULT = { 0.3, 0.3, 0.3, 0.9 }
 local DEFAULT_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 
+local TRINKET_ROLE_LABELS = {
+  TANK = "Tanks",
+  HEALER = "Healers",
+  MELEEDPS = "Melee DPS",
+  RANGEDPS = "Ranged DPS",
+  DPS = "DPS",
+}
+
+local TRINKET_ROLE_ORDER = { "TANK", "HEALER", "MELEEDPS", "RANGEDPS", "DPS" }
+
+local function FormatTrinketRoleList(roles)
+  if type(roles) ~= "table" then
+    return nil
+  end
+  local list = {}
+  for _, key in ipairs(TRINKET_ROLE_ORDER) do
+    if roles[key] then
+      list[#list + 1] = TRINKET_ROLE_LABELS[key] or key
+    end
+  end
+  if #list == 0 then
+    return nil
+  end
+  return table.concat(list, ", ")
+end
+
 local function FormatVoteLabel(vote)
   if not vote or vote == "" then
     return "None"
@@ -51,17 +77,37 @@ local function GetVoteProvider(session)
   return LiveProvider
 end
 
+local function StripRealmForDisplay(name)
+  if not name or name == "" then
+    return name
+  end
+  if type(name) == "string" and name:match("^Player%-") then
+    return name
+  end
+  if NS and NS.GetPlayerBaseName then
+    return NS:GetPlayerBaseName(name) or name
+  end
+  local base = tostring(name):match("^([^%-]+)")
+  return base or name
+end
+
 local function GetVoterDisplayName(provider, key)
   if not key then
     return nil
   end
-  if provider and provider.GetPlayerName then
-    local name = provider:GetPlayerName(key)
-    if name and name ~= "" then
-      return name
-    end
+  local name = provider and provider.GetPlayerName and provider:GetPlayerName(key) or key
+  if type(name) == "string" and name:match("^Player%-") then
+    return name
   end
-  return key
+  local isGuest = false
+  local player = provider and provider.GetPlayer and provider:GetPlayer(key) or nil
+  if player and GLD and GLD.IsGuestEntry then
+    isGuest = GLD:IsGuestEntry(player)
+  end
+  if NS and NS.GetPlayerDisplayName then
+    return NS:GetPlayerDisplayName(name, isGuest)
+  end
+  return StripRealmForDisplay(name)
 end
 
 local function GetClassColorCode(classToken)
@@ -326,22 +372,11 @@ local function BuildAdminOverrideCandidates(session)
     if not canFilter or not itemReady then
       return true
     end
-    local classFile = nil
-    local specName = nil
-    if provider and provider.GetPlayer then
-      local player = provider:GetPlayer(key)
-      if player then
-        classFile = player.class or player.classToken
-        specName = player.specName or player.spec
-      end
+    if GLD and GLD.GetEligibilityForVote then
+      local ok = GLD:GetEligibilityForVote(session, key, "NEED")
+      return ok == true
     end
-    if not classFile and classHint then
-      classFile = classHint[key]
-    end
-    if not classFile then
-      return true
-    end
-    return GLD:IsEligibleForNeed(classFile, itemRef, specName)
+    return true
   end
 
   for _, key in ipairs(expected) do
@@ -355,7 +390,7 @@ local function BuildAdminOverrideCandidates(session)
     for key, player in pairs(provider:GetPlayers() or {}) do
       if key and isEligible(key) then
         keys[#keys + 1] = key
-        labels[#labels + 1] = (provider.GetPlayerName and provider:GetPlayerName(key))
+        labels[#labels + 1] = GetVoterDisplayName(provider, key)
           or (player and (player.name or player.fullName))
           or tostring(key)
       end
@@ -719,21 +754,89 @@ local function EnsureLootWindow(self)
 end
 
 local function UpdateVoteButtons(window, session, alreadyVoted)
+  local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
+  local eligibility = { NEED = true, GREED = true, TRANSMOG = true, PASS = true }
+  local reasons = { NEED = nil, GREED = nil, TRANSMOG = nil, PASS = nil }
+  if session and GLD and GLD.GetEligibilityForVote then
+    eligibility.NEED, reasons.NEED = GLD:GetEligibilityForVote(session, localKey, "NEED", { log = true, requireData = true })
+    eligibility.GREED, reasons.GREED = GLD:GetEligibilityForVote(session, localKey, "GREED", { log = true })
+    eligibility.TRANSMOG, reasons.TRANSMOG = GLD:GetEligibilityForVote(session, localKey, "TRANSMOG", { log = true })
+  end
+  local reasonTexts = {}
+  if GLD and GLD.GetEligibilityReasonText then
+    for voteType, reason in pairs(reasons) do
+      if reason then
+        reasonTexts[voteType] = GLD:GetEligibilityReasonText(reason, session)
+      end
+    end
+  end
+  window.needDisabledReasonText = eligibility.NEED == false and reasonTexts.NEED or nil
+
+  local debugEnabled = GLD and GLD.IsDebugEnabled and GLD:IsDebugEnabled()
+  if debugEnabled and session then
+    local provider = session.isTest and TestProvider or LiveProvider
+    local player = provider and provider.GetPlayer and provider:GetPlayer(localKey) or nil
+    local classFile = player and (player.classFile or player.classFileName or player.classToken or player.class) or nil
+    local specName = player and (player.specName or player.spec) or nil
+    local roleKey = (GLD and GLD.GetTrinketRoleKey and classFile) and GLD:GetTrinketRoleKey(classFile, specName) or nil
+    local name = provider and provider.GetPlayerName and provider:GetPlayerName(localKey) or localKey or "Unknown"
+    local snapshot = session.restrictionSnapshot
+    local roleText = snapshot and FormatTrinketRoleList(snapshot.trinketRoles) or "none"
+    GLD:Debug(
+      "Vote UI refresh: player="
+        .. tostring(name)
+        .. " class="
+        .. tostring(classFile)
+        .. " spec="
+        .. tostring(specName)
+        .. " role="
+        .. tostring(roleKey)
+    )
+    GLD:Debug(
+      "Vote UI snapshot: trinketRoles="
+        .. tostring(roleText)
+        .. " itemId="
+        .. tostring(snapshot and snapshot.itemId or session.itemID)
+    )
+  end
+
   for vote, button in pairs(window.voteButtons or {}) do
     if not button or not button.SetEnabled then
       -- skip invalid button
     else
       local allow = not alreadyVoted
-      if session then
-        if vote == "NEED" and session.canNeed == false then
-          allow = false
-        elseif vote == "GREED" and session.canGreed == false then
-          allow = false
-        elseif vote == "TRANSMOG" and session.canTransmog == false then
-          allow = false
-        end
+      if session and eligibility[vote] == false then
+        allow = false
       end
       button:SetEnabled(allow)
+      button:SetAlpha(allow and 1 or 0.45)
+      if not allow and not alreadyVoted then
+        button.gldDisabledReason = reasonTexts[vote]
+      else
+        button.gldDisabledReason = nil
+      end
+      if not button.gldTooltipHooked then
+        button.gldTooltipHooked = true
+        button:SetScript("OnEnter", function(selfBtn)
+          if selfBtn.gldDisabledReason then
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
+            GameTooltip:SetText(selfBtn.gldDisabledReason, 1, 0.8, 0, true)
+            GameTooltip:Show()
+          end
+        end)
+        button:SetScript("OnLeave", function()
+          GameTooltip:Hide()
+        end)
+      end
+      if debugEnabled then
+        GLD:Debug(
+          "Vote UI button: vote="
+            .. tostring(vote)
+            .. " enabled="
+            .. tostring(allow)
+            .. (button.gldDisabledReason and (" reason=" .. tostring(button.gldDisabledReason)) or "")
+        )
+      end
     end
   end
 end
@@ -782,6 +885,7 @@ local function UpdateActivePanel(self, state, window)
   window.activeIcon:SetTexture(icon)
 
   local alreadyVoted = entry.vote and entry.vote ~= ""
+  UpdateVoteButtons(window, session, alreadyVoted)
   if alreadyVoted then
     local voteText = FormatVoteLabel(entry.vote)
     window.activeStatusLabel:SetText("Vote submitted: " .. voteText .. ". Waiting for results.")
@@ -789,10 +893,13 @@ local function UpdateActivePanel(self, state, window)
     window.activeMessageLabel:Show()
   else
     window.activeStatusLabel:SetText("Declare your intent here. Buttons remain enabled until you vote.")
-    window.activeMessageLabel:Hide()
+    if window.needDisabledReasonText then
+      window.activeMessageLabel:SetText("Need disabled: " .. tostring(window.needDisabledReasonText))
+      window.activeMessageLabel:Show()
+    else
+      window.activeMessageLabel:Hide()
+    end
   end
-
-  UpdateVoteButtons(window, session, alreadyVoted)
 end
 
 local function UpdatePendingRows(self, state, window)

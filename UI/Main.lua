@@ -336,8 +336,8 @@ local function SafeRegisterEvent(frame, event)
   return ok
 end
 
-local function BuildDefaultRosterColumns()
-  return {
+local function BuildDefaultRosterColumns(includeRemove)
+  local columns = {
     { key = "class", label = "Class", width = 32, align = "CENTER", isIcon = true },
     { key = "spec", label = "Spec", width = 32, align = "CENTER", isIcon = true },
     { key = "role", label = "Role", width = 60, align = "CENTER" },
@@ -348,6 +348,10 @@ local function BuildDefaultRosterColumns()
     { key = "raidsAttended", label = "Raids Attended", width = 110, align = "CENTER", sortKey = "raidsAttended" },
     { key = "attendance", label = "Attendance", width = 90, align = "CENTER", sortKey = "attendance" },
   }
+  if includeRemove then
+    columns[#columns + 1] = { key = "remove", label = "Remove", width = 70, align = "CENTER" }
+  end
+  return columns
 end
 
 local function CalculateMainFrameWidth(columns)
@@ -1555,7 +1559,11 @@ end
 
 function GLD:CreateTable(frame)
   local ui = self.UI
-  ui.rosterColumns = ui.rosterColumns or BuildDefaultRosterColumns()
+  local showRemove = self.CanAccessAdminUI and self:CanAccessAdminUI() or false
+  if not ui.rosterColumns or ui.rosterColumnsIsAdmin ~= showRemove then
+    ui.rosterColumns = BuildDefaultRosterColumns(showRemove)
+    ui.rosterColumnsIsAdmin = showRemove
+  end
   self.rosterColumns = ui.rosterColumns
   self:UpdateColumnOffsets()
 
@@ -1710,7 +1718,9 @@ function GLD:CreateBottomBar(frame)
   buttons[#buttons].hideWhenNoAuthority = false
   buttons[#buttons + 1] = CreateActionButton("End Session", 100, function()
     RequireAuthorityAccess(function()
-      if self.EndSession then
+      if self.PromptEndSession then
+        self:PromptEndSession()
+      elseif self.EndSession then
         self:EndSession()
       end
       ui:RefreshMain()
@@ -1720,7 +1730,9 @@ function GLD:CreateBottomBar(frame)
   buttons[#buttons].hideWhenNoAuthority = false
   buttons[#buttons + 1] = CreateActionButton("Start Session", 100, function()
     RequireAuthorityAccess(function()
-      if self.StartSession then
+      if self.PromptStartSession then
+        self:PromptStartSession()
+      elseif self.StartSession then
         self:StartSession()
       end
       ui:RefreshMain()
@@ -1729,12 +1741,12 @@ function GLD:CreateBottomBar(frame)
   buttons[#buttons].requiresAuthority = false
   buttons[#buttons].hideWhenNoAuthority = false
   buttons[#buttons + 1] = CreateActionButton("Guest Anchors", 110, function()
-    RequireAuthorityAccess(function()
+    RequireAdminAccess(function()
       ui.guestAnchorsVisible = not ui.guestAnchorsVisible
       ui:RefreshMain()
     end)
   end)
-  buttons[#buttons].requiresAuthority = true
+  buttons[#buttons].requiresAuthority = false
   buttons[#buttons].hideWhenNoAuthority = false
 
   local previous = nil
@@ -1829,9 +1841,9 @@ function GLD:UpdateBottomBarPermissions()
     end
   end
   if ui.toggleGuestsBtn and ui.toggleGuestsBtn.SetEnabled then
-    ui.toggleGuestsBtn:SetEnabled(canMutate)
+    ui.toggleGuestsBtn:SetEnabled(canAccessAdmin)
   end
-  if not canMutate and ui.guestAnchorsVisible then
+  if not canAccessAdmin and ui.guestAnchorsVisible then
     ui.guestAnchorsVisible = false
     if self.UpdateGuestPanelLayout then
       self:UpdateGuestPanelLayout()
@@ -2015,14 +2027,17 @@ function GLD:GetRosterSource()
     return (self.db and self.db.players) or {}
   end
   local roster = self.shadow and self.shadow.roster or nil
-  if type(roster) == "table" and next(roster) ~= nil then
-    if self.IsDebugEnabled and self:IsDebugEnabled() then
-      if self._lastRosterSourceLabel ~= "shadow.roster" then
-        self._lastRosterSourceLabel = "shadow.roster"
-        self:Debug("Roster source: shadow.roster")
+  if type(roster) == "table" then
+    local rosterReady = (self.shadow and self.shadow.rosterReceived) or (self.shadow and (self.shadow.lastSyncAt or 0) > 0)
+    if rosterReady or next(roster) ~= nil then
+      if self.IsDebugEnabled and self:IsDebugEnabled() then
+        if self._lastRosterSourceLabel ~= "shadow.roster" then
+          self._lastRosterSourceLabel = "shadow.roster"
+          self:Debug("Roster source: shadow.roster")
+        end
       end
+      return roster
     end
-    return roster
   end
   if self.IsDebugEnabled and self:IsDebugEnabled() then
     if self._lastRosterSourceLabel ~= "db.players_fallback" then
@@ -2146,6 +2161,9 @@ function GLD:BuildRosterRowData(entry)
     member = entry.member
     playerKey = entry.key
   end
+  if not playerKey and type(entry) == "table" then
+    playerKey = entry.rosterKey or entry.playerKey or entry.key
+  end
   local rawName = self:GetMemberName(member)
   local isGuest = self:IsGuestMember(member)
   local baseName = NS:GetPlayerBaseName(rawName) or rawName or "?"
@@ -2196,10 +2214,27 @@ function GLD:BuildRosterRowData(entry)
   if not playerKey and baseName and self.FindPlayerKeyByName then
     playerKey = self:FindPlayerKeyByName(baseName, member and member.realm)
   end
+  if not playerKey and member then
+    local entryName = member.fullName or member.name or rawName
+    local entryRealm = member.realm
+    if entryName and not entryRealm and NS.SplitNameRealm then
+      local base, realm = NS:SplitNameRealm(entryName)
+      if base then
+        entryName = base
+        entryRealm = realm
+      end
+    end
+    if entryName and entryRealm and entryRealm ~= "" then
+      playerKey = entryName .. "-" .. entryRealm
+    elseif entryName and entryName ~= "" then
+      playerKey = entryName
+    end
+  end
 
   return {
     member = member,
     playerKey = playerKey,
+    rosterKey = playerKey,
     name = baseName,
     nameLower = (baseName or ""):lower(),
     displayName = displayName,
@@ -2246,6 +2281,12 @@ function GLD:InitializeRosterRow(row)
       tex:SetSize(ROSTER_ICON_SIZE, ROSTER_ICON_SIZE)
       tex:SetPoint("LEFT", row, "LEFT", col.x + (col.width - ROSTER_ICON_SIZE) * 0.5, 0)
       row.cells[col.key] = tex
+    elseif col.key == "remove" then
+      local button = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+      button:SetSize(col.width, ROSTER_ROW_HEIGHT - 2)
+      button:SetPoint("LEFT", row, "LEFT", col.x, 0)
+      button:SetText("Remove")
+      row.cells[col.key] = button
     else
       local fs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
       fs:SetWidth(col.width)
@@ -2294,6 +2335,119 @@ function GLD:InitializeRosterRow(row)
     return true
   end
 
+  if row.cells.remove then
+    row.cells.remove:SetScript("OnClick", function()
+      local data = row.data
+      local actor = self:GetUnitFullName("player") or UnitName("player") or "Unknown"
+      local target = data and (data.displayName or data.name or "?") or "?"
+      local rosterKey = row.rosterKey or (data and data.rosterKey) or (data and data.playerKey) or nil
+      local isGuest = data and data.isGuest or false
+      local attendance = data and data.attendanceStatus or nil
+      local presentFlag = nil
+      if attendance ~= nil then
+        local attKey = tostring(attendance):upper()
+        if attKey == "PRESENT" then
+          presentFlag = true
+        elseif attKey == "ABSENT" or attKey == "OFFLINE" then
+          presentFlag = false
+        end
+      end
+      local reason = nil
+      local ok = false
+      if self.IsDebugEnabled and self:IsDebugEnabled() then
+        self:Debug(
+          "Roster remove click: actor="
+            .. tostring(actor)
+            .. " target="
+            .. tostring(target)
+            .. " key="
+            .. tostring(rosterKey)
+            .. " isGuest="
+            .. tostring(isGuest)
+            .. " attendance="
+            .. tostring(attendance)
+            .. " present="
+            .. tostring(presentFlag)
+        )
+      end
+      if not self:IsRosterEditEnabled() then
+        reason = "edit_roster_off"
+      elseif not rosterKey then
+        reason = "missing_player_key"
+      elseif not self.db or not self.db.players or not self.db.players[rosterKey] then
+        reason = "missing_player"
+      else
+        local player = self.db.players[rosterKey]
+        if self.IsGuestMember then
+          isGuest = self:IsGuestMember(player)
+        end
+        local classFile = player and (player.classFile or player.classFileName or player.class)
+        local specName = player and (player.specName or player.spec)
+        local targetName = player and player.name or data.name
+        if self.RemoveRosterMember then
+          ok, reason = self:RemoveRosterMember(rosterKey)
+        else
+          reason = "remove_handler_missing"
+        end
+        if ok then
+          if self.LogAuditEvent then
+            self:LogAuditEvent("REMOVE_MEMBER", {
+              actor = actor,
+              target = targetName,
+              isGuest = isGuest,
+              class = classFile,
+              spec = specName,
+              rosterKey = rosterKey,
+            })
+          end
+          if not self.OnRosterChanged then
+            if self.BroadcastSnapshot then
+              self:BroadcastSnapshot(true)
+              if self.IsDebugEnabled and self:IsDebugEnabled() then
+                self:Debug("Roster remove broadcast: key=" .. tostring(rosterKey))
+              end
+            end
+            if self.UI and self.UI.RefreshMain then
+              self.UI:RefreshMain()
+            end
+          end
+        else
+          reason = reason or "remove_failed"
+        end
+      end
+      if self.IsDebugEnabled and self:IsDebugEnabled() then
+        local outcome = ok and "ok" or (reason or "failed")
+        self:Debug(
+          "Roster remove result: actor="
+            .. tostring(actor)
+            .. " target="
+            .. tostring(target)
+            .. " key="
+            .. tostring(rosterKey)
+            .. " isGuest="
+            .. tostring(isGuest)
+            .. " result="
+            .. tostring(outcome)
+        )
+        if not ok and (reason == "missing_player_key" or reason == "missing_player") and self.GetRosterSource then
+          local roster = self:GetRosterSource()
+          local sample = {}
+          if type(roster) == "table" then
+            for k in pairs(roster) do
+              sample[#sample + 1] = tostring(k)
+              if #sample >= 8 then
+                break
+              end
+            end
+          end
+          if #sample > 0 then
+            self:Debug("Roster remove lookup sample keys: " .. table.concat(sample, ", "))
+          end
+        end
+      end
+    end)
+  end
+
   if row.queuePosBox then
     row.queuePosBox:SetScript("OnEnterPressed", function(box)
       local data = row.data
@@ -2318,8 +2472,12 @@ function GLD:InitializeRosterRow(row)
           end
         end
       end
-      self:RefreshTable()
-      self:UpdateRosterStatusText()
+      if pos ~= nil and self.OnRosterChanged then
+        self:OnRosterChanged("edit_queue_pos")
+      else
+        self:RefreshTable()
+        self:UpdateRosterStatusText()
+      end
       box:ClearFocus()
     end)
   end
@@ -2335,7 +2493,11 @@ function GLD:InitializeRosterRow(row)
       if pos ~= nil then
         self.db.players[data.playerKey].savedPos = pos
       end
-      self:RefreshTable()
+      if pos ~= nil and self.OnRosterChanged then
+        self:OnRosterChanged("edit_held_pos")
+      else
+        self:RefreshTable()
+      end
       box:ClearFocus()
     end)
   end
@@ -2351,7 +2513,11 @@ function GLD:InitializeRosterRow(row)
       if num ~= nil then
         self.db.players[data.playerKey].numAccepted = num
       end
-      self:RefreshTable()
+      if num ~= nil and self.OnRosterChanged then
+        self:OnRosterChanged("edit_items_won")
+      else
+        self:RefreshTable()
+      end
       box:ClearFocus()
     end)
   end
@@ -2367,7 +2533,11 @@ function GLD:InitializeRosterRow(row)
       if num ~= nil then
         self.db.players[data.playerKey].attendanceCount = num
       end
-      self:RefreshTable()
+      if num ~= nil and self.OnRosterChanged then
+        self:OnRosterChanged("edit_raids_attended")
+      else
+        self:RefreshTable()
+      end
       box:ClearFocus()
     end)
   end
@@ -2399,7 +2569,11 @@ function GLD:InitializeRosterRow(row)
           player.attendance = status
         end
       end
-      self:RefreshTable()
+      if status and self.OnRosterChanged then
+        self:OnRosterChanged("edit_attendance")
+      else
+        self:RefreshTable()
+      end
       box:ClearFocus()
     end)
   end
@@ -2412,6 +2586,7 @@ function GLD:PopulateRosterRow(row, data)
     return
   end
   row.data = data
+  row.rosterKey = data.rosterKey or data.playerKey
   local cells = row.cells
 
   local classIcon = cells.class
@@ -2550,6 +2725,18 @@ function GLD:PopulateRosterRow(row, data)
       end
     end
   end
+
+  if cells.remove then
+    if editEnabled then
+      cells.remove:Show()
+      local canRemove = data.playerKey and self.db and self.db.players and self.db.players[data.playerKey] ~= nil
+      if cells.remove.SetEnabled then
+        cells.remove:SetEnabled(canRemove == true)
+      end
+    else
+      cells.remove:Hide()
+    end
+  end
 end
 
 function GLD:PassRosterFilters(rowData)
@@ -2651,7 +2838,7 @@ function GLD:RefreshGuestAnchors()
   local canMutate = self.CanMutateState and self:CanMutateState() or false
   local existingGuests = {}
   for key, player in pairs(self.db and self.db.players or {}) do
-    if player and player.source == "guest" then
+    if player and (player.source == "guest" or player.isGuest == true) then
       existingGuests[key] = true
     end
   end
@@ -2665,10 +2852,6 @@ function GLD:RefreshGuestAnchors()
       return
     end
     if UnitIsInMyGuild and UnitIsInMyGuild(unit) then
-      return
-    end
-    local key = NS:GetPlayerKeyFromUnit(unit)
-    if key and existingGuests[key] then
       return
     end
     units[#units + 1] = unit
@@ -2712,9 +2895,8 @@ function GLD:RefreshGuestAnchors()
       row.name:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
       row.name:SetWidth(200)
       row.addButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-      row.addButton:SetSize(90, 18)
+      row.addButton:SetSize(170, 18)
       row.addButton:SetPoint("RIGHT", row, "RIGHT", -6, 0)
-      row.addButton:SetText("Add Guest")
       panel.rows[index] = row
     end
 
@@ -2724,10 +2906,23 @@ function GLD:RefreshGuestAnchors()
 
     local name = UnitName(unit)
     local classFile = select(2, UnitClass(unit))
-    local displayName = NS:GetPlayerDisplayName(name, false)
+    local isGuest = self.IsGuest and self:IsGuest(unit) or false
+    local displayName = NS:GetPlayerDisplayName(name, isGuest)
     row.name:SetText(displayName)
     local r, g, b = NS:GetClassColor(classFile)
     row.name:SetTextColor(r, g, b)
+
+    local playerKey = NS:GetPlayerKeyFromUnit(unit)
+    local inRoster = playerKey and existingGuests[playerKey] or false
+    if row.addButton then
+      row.addButton:SetText(inRoster and "Remove Guest from Roster" or "Add Guest to Roster")
+    end
+
+    local unitRef = unit
+    local nameRef = name
+    local displayNameRef = displayName
+    local playerKeyRef = playerKey
+    local inRosterRef = inRoster
 
     if classFile and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classFile] then
       local coords = CLASS_ICON_TCOORDS[classFile]
@@ -2746,10 +2941,96 @@ function GLD:RefreshGuestAnchors()
         self:Print("you do not have Guild Permission to access this panel")
         return
       end
-      if self.AddGuestFromUnit then
-        self:AddGuestFromUnit(unit)
+      if inRosterRef then
+        local actor = self:GetUnitFullName("player") or UnitName("player") or "Unknown"
+        local attendance = nil
+        local presentFlag = nil
+        if playerKeyRef and self.db and self.db.players and self.db.players[playerKeyRef] then
+          attendance = self.db.players[playerKeyRef].attendance
+          if attendance ~= nil then
+            local attKey = tostring(attendance):upper()
+            if attKey == "PRESENT" then
+              presentFlag = true
+            elseif attKey == "ABSENT" or attKey == "OFFLINE" then
+              presentFlag = false
+            end
+          end
+        end
+        if self.IsDebugEnabled and self:IsDebugEnabled() then
+          self:Debug(
+            "Guest remove click: actor="
+              .. tostring(actor)
+              .. " target="
+              .. tostring(displayNameRef or nameRef or "?")
+              .. " key="
+              .. tostring(playerKeyRef)
+              .. " attendance="
+              .. tostring(attendance)
+              .. " present="
+              .. tostring(presentFlag)
+          )
+        end
+        local ok = false
+        local reason = nil
+        if not playerKeyRef then
+          reason = "missing_player_key"
+        elseif not self.db or not self.db.players or not self.db.players[playerKeyRef] then
+          reason = "missing_player"
+        else
+          local player = self.db.players[playerKeyRef]
+          local classFile = player and (player.classFile or player.classFileName or player.class)
+          local specName = player and (player.specName or player.spec)
+          local targetName = player and player.name or nameRef
+          if self.RemoveRosterMember then
+            ok, reason = self:RemoveRosterMember(playerKeyRef)
+          else
+            reason = "remove_handler_missing"
+          end
+          if ok then
+            if self.LogAuditEvent then
+              self:LogAuditEvent("REMOVE_MEMBER", {
+                actor = actor,
+                target = targetName,
+                isGuest = true,
+                class = classFile,
+                spec = specName,
+                rosterKey = playerKeyRef,
+              })
+            end
+            if not self.OnRosterChanged then
+              if self.BroadcastSnapshot then
+                self:BroadcastSnapshot(true)
+                if self.IsDebugEnabled and self:IsDebugEnabled() then
+                  self:Debug("Guest remove broadcast: key=" .. tostring(playerKeyRef))
+                end
+              end
+              if self.UI and self.UI.RefreshMain then
+                self.UI:RefreshMain()
+              end
+            end
+          else
+            reason = reason or "remove_failed"
+          end
+        end
+        if self.IsDebugEnabled and self:IsDebugEnabled() then
+          local outcome = ok and "ok" or (reason or "failed")
+          self:Debug(
+            "Guest remove result: actor="
+              .. tostring(actor)
+              .. " target="
+              .. tostring(displayNameRef or nameRef or "?")
+              .. " key="
+              .. tostring(playerKeyRef)
+              .. " result="
+              .. tostring(outcome)
+          )
+        end
+      else
+        if self.AddGuestFromUnit then
+          self:AddGuestFromUnit(unitRef)
+        end
+        UI:RefreshMain()
       end
-      UI:RefreshMain()
     end)
     row:Show()
   end
@@ -2767,8 +3048,24 @@ function UI:SubmitRollVote(session, vote, advanceTest)
     return
   end
 
-  session.votes = session.votes or {}
   local key = NS:GetPlayerKeyFromUnit("player")
+  if not key then
+    return
+  end
+  if GLD and GLD.GetEligibilityForVote then
+    local eligible, reason = GLD:GetEligibilityForVote(session, key, vote, { log = true, requireData = true })
+    if not eligible then
+      local reasonText = GLD.GetEligibilityReasonText and GLD:GetEligibilityReasonText(reason, session) or nil
+      local msg = "Vote blocked: " .. tostring(vote)
+      if reasonText then
+        msg = msg .. " (" .. tostring(reasonText) .. ")"
+      end
+      GLD:Print(msg)
+      return
+    end
+  end
+
+  session.votes = session.votes or {}
   session.votes[key] = vote
 
   if session.isTest and GLD.CheckRollCompletion then
@@ -2934,6 +3231,31 @@ function UI:ShowRollPopup(session)
   waitLabel:SetText("")
   frame:AddChild(waitLabel)
 
+  local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
+  local eligibility = { NEED = true, GREED = true, TRANSMOG = true, PASS = true }
+  local reasons = {}
+  if GLD and GLD.GetEligibilityForVote then
+    eligibility.NEED, reasons.NEED = GLD:GetEligibilityForVote(session, localKey, "NEED", { log = true, requireData = true })
+    eligibility.GREED, reasons.GREED = GLD:GetEligibilityForVote(session, localKey, "GREED", { log = true })
+    eligibility.TRANSMOG, reasons.TRANSMOG = GLD:GetEligibilityForVote(session, localKey, "TRANSMOG", { log = true })
+  end
+  local reasonTexts = {}
+  if GLD and GLD.GetEligibilityReasonText then
+    for voteType, reason in pairs(reasons) do
+      if reason then
+        reasonTexts[voteType] = GLD:GetEligibilityReasonText(reason, session)
+      end
+    end
+  end
+  if eligibility.NEED == false then
+    local reasonText = reasonTexts.NEED
+    if reasonText then
+      waitLabel:SetText("Need disabled: " .. tostring(reasonText))
+    else
+      waitLabel:SetText("Need disabled.")
+    end
+  end
+
   local buttons = {
     { label = "Need", vote = "NEED" },
     { label = "Greed", vote = "GREED" },
@@ -2945,14 +3267,23 @@ function UI:ShowRollPopup(session)
     local button = AceGUI:Create("Button")
     button:SetText(btn.label)
     button:SetWidth(90)
-    if btn.vote == "NEED" and session.canNeed == false then
-      button:SetDisabled(true)
+    local allow = eligibility[btn.vote] ~= false
+    button:SetDisabled(not allow)
+    if button.frame and button.frame.SetAlpha then
+      button.frame:SetAlpha(allow and 1 or 0.45)
     end
-    if btn.vote == "GREED" and session.canGreed == false then
-      button:SetDisabled(true)
-    end
-    if btn.vote == "TRANSMOG" and session.canTransmog == false then
-      button:SetDisabled(true)
+    button.gldDisabledReason = (not allow and reasonTexts[btn.vote]) or nil
+    if button.frame then
+      button.frame:SetScript("OnEnter", function()
+        if button.gldDisabledReason then
+          GameTooltip:SetOwner(button.frame, "ANCHOR_RIGHT")
+          GameTooltip:SetText(button.gldDisabledReason, 1, 0.8, 0, true)
+          GameTooltip:Show()
+        end
+      end)
+      button.frame:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+      end)
     end
     button:SetCallback("OnClick", function()
       self:SubmitRollVote(session, btn.vote, btn.vote ~= "NEED")
@@ -2999,7 +3330,7 @@ function UI:ShowRollResultPopup(result)
   frame:SetTitle("Loot Result")
   frame:SetStatusText(result.itemName or "Item")
   frame:SetWidth(420)
-  frame:SetHeight(180)
+  frame:SetHeight(220)
   frame:SetLayout("Flow")
   frame:EnableResize(false)
 
@@ -3019,10 +3350,116 @@ function UI:ShowRollResultPopup(result)
   end)
   frame:AddChild(itemLabel)
 
-  local winnerLabel = AceGUI:Create("Label")
-  winnerLabel:SetFullWidth(true)
-  winnerLabel:SetText("Winner: " .. tostring(result.winnerName or "None"))
-  frame:AddChild(winnerLabel)
+  local function GetShortName(name)
+    if not name then
+      return nil
+    end
+    local base = tostring(name)
+    local short = base:match("^[^%-]+")
+    return short or base
+  end
+
+  local function GetClassColoredName(name, classToken)
+    if not name or name == "" then
+      return ""
+    end
+    if not classToken or classToken == "" then
+      return name
+    end
+    local token = tostring(classToken):upper()
+    local color = nil
+    if C_ClassColor and C_ClassColor.GetClassColor then
+      color = C_ClassColor.GetClassColor(token)
+    end
+    if not color and RAID_CLASS_COLORS then
+      color = RAID_CLASS_COLORS[token]
+    end
+    if not color then
+      return name
+    end
+    local r = color.r or color[1] or 1
+    local g = color.g or color[2] or 1
+    local b = color.b or color[3] or 1
+    return string.format("|cFF%02x%02x%02x%s|r", math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5), tostring(name))
+  end
+
+  local function GetVoteLabel(vote)
+    if vote == "NEED" then
+      return "Need"
+    end
+    if vote == "GREED" then
+      return "Greed"
+    end
+    if vote == "TRANSMOG" then
+      return "Mog"
+    end
+    return vote and tostring(vote) or "Roll"
+  end
+
+  local function GetWinningRoll(payload)
+    local roll = payload and payload.winningRoll or nil
+    if roll == nil and GLD and GLD.GetWinnerRoll then
+      roll = GLD:GetWinnerRoll(payload)
+    end
+    return roll
+  end
+
+  local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
+  local localFull = GLD and GLD.GetUnitFullName and GLD:GetUnitFullName("player") or nil
+  local localShort = UnitName("player")
+
+  local function DidParticipate(payload)
+    local votes = payload and payload.votes or nil
+    if not votes then
+      return false
+    end
+    if localFull and votes[localFull] then
+      return true
+    end
+    if localShort and votes[localShort] then
+      return true
+    end
+    if localKey and votes[localKey] then
+      return true
+    end
+    return false
+  end
+
+  local isWinner = false
+  if localKey and result.winnerKey and result.winnerKey == localKey then
+    isWinner = true
+  elseif localFull and result.winnerName and result.winnerName == localFull then
+    isWinner = true
+  elseif localShort and result.winnerShortName and result.winnerShortName == localShort then
+    isWinner = true
+  end
+
+  local participated = DidParticipate(result)
+  local roll = GetWinningRoll(result)
+  local rollText = roll ~= nil and tostring(roll) or "?"
+  local bodyText = nil
+
+  if isWinner then
+    local instructionVote = result.instructionVote or result.winnerVote
+    local instructionLabel = GetVoteLabel(instructionVote)
+    bodyText = "You are the winner with - " .. rollText .. "\nPlease " .. instructionLabel .. " for your item to claim it"
+  elseif participated then
+    local winnerName = result.winnerShortName or GetShortName(result.winnerName) or "None"
+    local coloredName = GetClassColoredName(winnerName, result.winnerClassToken)
+    bodyText = "Winner: " .. coloredName .. " - " .. rollText .. "\nPlease pass on the item"
+  else
+    local summaryLines = GLD and GLD.BuildRollResultLines and GLD:BuildRollResultLines(result) or nil
+    if summaryLines and #summaryLines > 0 then
+      bodyText = table.concat(summaryLines, "\n")
+    else
+      bodyText = "Winner: " .. tostring(result.winnerName or "None")
+    end
+  end
+
+  local summaryLabel = AceGUI:Create("Label")
+  summaryLabel:SetFullWidth(true)
+  summaryLabel:SetText(bodyText)
+  frame:AddChild(summaryLabel)
 
   local closeBtn = AceGUI:Create("Button")
   closeBtn:SetText("OK")
