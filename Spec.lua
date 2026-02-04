@@ -188,8 +188,8 @@ function GLD:OnInspectReady(_, guid)
 end
 
 function GLD:QueueGroupSpecSync()
+  self:UpdateSelfSpec()
   if not IsInRaid() then
-    self:UpdateSelfSpec()
     return
   end
   for i = 1, GetNumGroupMembers() do

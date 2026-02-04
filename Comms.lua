@@ -34,6 +34,28 @@ local function StableStringify(value, depth)
   return tostring(value)
 end
 
+local AUDIT_QUERY = "AUDIT_Q"
+local AUDIT_RESPONSE = "AUDIT_R"
+local AUDIT_TIMEOUT_SECONDS = 3
+
+local function ParseBuildValue(value)
+  if value == nil then
+    return nil
+  end
+  if type(value) == "number" then
+    return { value }
+  end
+  local str = tostring(value)
+  local parts = {}
+  for num in str:gmatch("%d+") do
+    parts[#parts + 1] = tonumber(num)
+  end
+  if #parts == 0 then
+    return nil
+  end
+  return parts
+end
+
 local function DeriveRollKey(self, payload)
   if not payload then
     return nil
@@ -54,6 +76,376 @@ local function DeriveRollKey(self, payload)
     return tostring(payload.rollID) .. "@legacy"
   end
   return nil
+end
+
+function GLD:GetAddonBuildString()
+  if NS.BUILD ~= nil then
+    return tostring(NS.BUILD)
+  end
+  if NS.VERSION ~= nil then
+    return tostring(NS.VERSION)
+  end
+  if NS.REVISION ~= nil then
+    return tostring(NS.REVISION)
+  end
+  return "0"
+end
+
+function GLD:CompareBuilds(a, b)
+  local ap = ParseBuildValue(a)
+  local bp = ParseBuildValue(b)
+  if not ap or not bp then
+    local sa = tostring(a or "")
+    local sb = tostring(b or "")
+    if sa == sb then
+      return 0
+    end
+    return sa < sb and -1 or 1
+  end
+  local max = #ap
+  if #bp > max then
+    max = #bp
+  end
+  for i = 1, max do
+    local av = ap[i] or 0
+    local bv = bp[i] or 0
+    if av < bv then
+      return -1
+    end
+    if av > bv then
+      return 1
+    end
+  end
+  return 0
+end
+
+function GLD:BuildAuditNonce()
+  self._auditNonce = (self._auditNonce or 0) + 1
+  local now = (GetServerTime and GetServerTime()) or time()
+  return tostring(now) .. "-" .. tostring(math.random(1000, 9999)) .. "-" .. tostring(self._auditNonce)
+end
+
+function GLD:CanRunAddonAudit()
+  if not IsInGuild() then
+    return false
+  end
+  local _, _, rankIndex = GetGuildInfo("player")
+  if rankIndex == nil then
+    return false
+  end
+  return rankIndex <= 2
+end
+
+function GLD:IsValidAuditSender(sender)
+  if not sender or sender == "" then
+    return false, nil
+  end
+  if not IsInRaid() then
+    return false, nil
+  end
+  local unit = self:GetUnitForSender(sender)
+  if not unit then
+    return false, nil
+  end
+  local ourGuild = self:GetOurGuildName()
+  if not ourGuild then
+    return false, unit
+  end
+  local guildName = GetGuildInfo(unit)
+  if not guildName or guildName ~= ourGuild then
+    return false, unit
+  end
+  return true, unit
+end
+
+function GLD:IsAuditQuerySenderAllowed(sender)
+  local ok, unit = self:IsValidAuditSender(sender)
+  if not ok or not unit then
+    return false
+  end
+  local _, _, rankIndex = GetGuildInfo(unit)
+  if rankIndex == nil then
+    return false
+  end
+  return rankIndex <= 2
+end
+
+function GLD:SendAuditMessage(payload)
+  if not payload or payload == "" then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  if C_ChatInfo and C_ChatInfo.SendAddonMessage then
+    C_ChatInfo.SendAddonMessage(NS.COMM_PREFIX, payload, "RAID")
+  elseif SendAddonMessage then
+    SendAddonMessage(NS.COMM_PREFIX, payload, "RAID")
+  end
+end
+
+function GLD:BuildAuditRoster()
+  local roster = {}
+  local order = {}
+  if not IsInRaid() then
+    return roster, order
+  end
+  for i = 1, 40 do
+    local unit = "raid" .. i
+    if UnitExists(unit) then
+      local key = NS:GetPlayerKeyFromUnit(unit) or self:GetUnitFullName(unit) or UnitName(unit) or unit
+      if key and not roster[key] then
+        local fullName = self:GetUnitFullName(unit) or UnitName(unit) or tostring(key)
+        roster[key] = {
+          key = key,
+          name = fullName,
+          displayName = (NS.GetPlayerDisplayName and NS:GetPlayerDisplayName(fullName)) or fullName,
+          unit = unit,
+        }
+        order[#order + 1] = key
+      end
+    end
+  end
+  return roster, order
+end
+
+function GLD:StartAddonAudit(manual, silent)
+  if not IsInRaid() then
+    if not silent then
+      self:Print("You must be in a raid to audit addons.")
+    end
+    return false
+  end
+  if not self:CanRunAddonAudit() then
+    if not silent then
+      self:ShowPermissionDeniedPopup()
+    end
+    return false
+  end
+  local requiredBuild = self:GetAddonBuildString()
+  local nonce = self:BuildAuditNonce()
+  local roster, order = self:BuildAuditRoster()
+  self.auditState = self.auditState or {}
+  local state = self.auditState
+  if state.timer and state.timer.Cancel then
+    state.timer:Cancel()
+  end
+  state.timer = nil
+  state.nonce = nonce
+  state.requiredBuild = requiredBuild
+  state.expected = roster
+  state.order = order
+  state.responses = {}
+  state.results = {}
+  state.summary = { ok = 0, outdated = 0, missing = 0 }
+  state.pending = true
+  state.startedAt = (GetServerTime and GetServerTime()) or time()
+  state.responseCount = 0
+  state.lastManual = manual == true
+  self:SendAuditMessage(string.format("%s|%s|%s", AUDIT_QUERY, nonce, requiredBuild))
+  if C_Timer and C_Timer.NewTimer then
+    state.timer = C_Timer.NewTimer(AUDIT_TIMEOUT_SECONDS, function()
+      if GLD and GLD.FinalizeAddonAudit then
+        GLD:FinalizeAddonAudit(nonce)
+      end
+    end)
+  elseif C_Timer and C_Timer.After then
+    C_Timer.After(AUDIT_TIMEOUT_SECONDS, function()
+      if GLD and GLD.FinalizeAddonAudit then
+        GLD:FinalizeAddonAudit(nonce)
+      end
+    end)
+  end
+  self:NotifyAddonAuditUpdated()
+  return true
+end
+
+function GLD:FinalizeAddonAudit(nonce)
+  local state = self.auditState
+  if not state or state.nonce ~= nonce then
+    return
+  end
+  state.pending = false
+  if state.timer and state.timer.Cancel then
+    state.timer:Cancel()
+  end
+  state.timer = nil
+  local results = {}
+  local okCount, outdatedCount, missingCount = 0, 0, 0
+  local requiredBuild = state.requiredBuild
+  local order = state.order or {}
+  for _, key in ipairs(order) do
+    local expected = state.expected and state.expected[key] or nil
+    local response = state.responses and state.responses[key] or nil
+    local name = expected and (expected.displayName or expected.name) or tostring(key)
+    local status = "MISSING"
+    local version = nil
+    if response and response.build then
+      version = response.build
+      local cmp = self:CompareBuilds(version, requiredBuild)
+      if cmp >= 0 then
+        status = "OK"
+        okCount = okCount + 1
+      else
+        status = "OUTDATED"
+        outdatedCount = outdatedCount + 1
+      end
+    else
+      missingCount = missingCount + 1
+    end
+    results[#results + 1] = {
+      key = key,
+      name = name,
+      status = status,
+      version = version,
+    }
+  end
+  state.results = results
+  state.summary = { ok = okCount, outdated = outdatedCount, missing = missingCount }
+  state.completedAt = (GetServerTime and GetServerTime()) or time()
+  self:NotifyAddonAuditUpdated()
+end
+
+function GLD:HandleAuditQuery(sender, nonce, requiredBuild, distribution)
+  if distribution ~= "RAID" then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  if not nonce or nonce == "" then
+    return
+  end
+  if not self:IsAuditQuerySenderAllowed(sender) then
+    return
+  end
+  local build = self:GetAddonBuildString()
+  self:SendAuditMessage(string.format("%s|%s|%s", AUDIT_RESPONSE, nonce, build))
+end
+
+function GLD:HandleAuditResponse(sender, nonce, build, distribution)
+  if distribution ~= "RAID" then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  local state = self.auditState
+  if not state or state.nonce ~= nonce then
+    return
+  end
+  local ok, unit = self:IsValidAuditSender(sender)
+  if not ok then
+    return
+  end
+  local key = nil
+  if unit then
+    key = NS:GetPlayerKeyFromUnit(unit) or self:GetUnitFullName(unit)
+    if key and state.expected and not state.expected[key] then
+      local alt = self:GetUnitFullName(unit)
+      if alt and state.expected[alt] then
+        key = alt
+      end
+    end
+  end
+  key = key or sender
+  state.responses = state.responses or {}
+  if not state.responses[key] then
+    state.responseCount = (state.responseCount or 0) + 1
+  end
+  state.responses[key] = {
+    build = build,
+    sender = sender,
+  }
+  if state.pending then
+    self:NotifyAddonAuditUpdated()
+  end
+end
+
+function GLD:HandleAuditCommMessage(sender, message, distribution)
+  if type(message) ~= "string" then
+    return false
+  end
+  if not message:find("^AUDIT_") then
+    return false
+  end
+  local tag, nonce, build = strsplit("|", message, 3)
+  if tag == AUDIT_QUERY then
+    self:HandleAuditQuery(sender, nonce, build, distribution)
+    return true
+  end
+  if tag == AUDIT_RESPONSE then
+    self:HandleAuditResponse(sender, nonce, build, distribution)
+    return true
+  end
+  return false
+end
+
+function GLD:GetAddonAuditSummaryText()
+  local state = self.auditState
+  if not state or not state.startedAt then
+    return "No audit run yet."
+  end
+  if state.pending then
+    local count = state.responseCount or 0
+    return string.format("Audit in progress... (%d replies)", count)
+  end
+  local summary = state.summary or {}
+  local required = state.requiredBuild or "?"
+  return string.format(
+    "Required build: %s | OK: %d  OUTDATED: %d  MISSING: %d",
+    tostring(required),
+    summary.ok or 0,
+    summary.outdated or 0,
+    summary.missing or 0
+  )
+end
+
+function GLD:GetAddonAuditRows()
+  local state = self.auditState
+  local rows = {}
+  if not state or not state.results then
+    return rows
+  end
+  if state.pending and (not state.results or #state.results == 0) then
+    rows[#rows + 1] = "Awaiting replies..."
+    return rows
+  end
+  for _, entry in ipairs(state.results) do
+    local name = entry.name or entry.key or "Unknown"
+    local status = entry.status or "?"
+    local version = entry.version or "-"
+    rows[#rows + 1] = string.format("%s | %s | %s", name, status, version)
+  end
+  return rows
+end
+
+function GLD:NotifyAddonAuditUpdated()
+  if self.RefreshAddonAuditOptions and self.options then
+    self:RefreshAddonAuditOptions(self.options)
+  end
+  local AceConfigRegistry = LibStub("AceConfigRegistry-3.0", true)
+  if AceConfigRegistry then
+    AceConfigRegistry:NotifyChange("GuildLoot")
+  end
+end
+
+function GLD:MaybeAutoAuditAddons()
+  if not IsInRaid() then
+    if self.auditState then
+      self.auditState.autoRanInRaid = false
+    end
+    return
+  end
+  self.auditState = self.auditState or {}
+  if self.auditState.autoRanInRaid then
+    return
+  end
+  if not self:CanRunAddonAudit() then
+    return
+  end
+  self.auditState.autoRanInRaid = true
+  self:StartAddonAudit(false, true)
 end
 
 function GLD:ComputeRosterHashFromSnapshot(roster)
@@ -156,6 +548,11 @@ function GLD:InitComms()
   self.commHandlers[NS.MSG.ADMIN_REQUEST] = function(sender, payload)
     self:HandleAdminRequest(sender, payload)
   end
+  if NS.MSG.NOTICE then
+    self.commHandlers[NS.MSG.NOTICE] = function(sender, payload)
+      self:HandleNotice(sender, payload)
+    end
+  end
 end
 
 function GLD:SendCommMessageSafe(msgType, payload, channel, target)
@@ -166,6 +563,16 @@ end
 
 function GLD:OnCommReceived(prefix, message, distribution, sender)
   if prefix ~= NS.COMM_PREFIX then
+    return
+  end
+  if type(message) == "string" then
+    local rawId, rawText = message:match("^NOTICE|([^|]*)|([%s%S]+)$")
+    if rawId and rawText then
+      self:HandleNotice(sender, { id = rawId, text = rawText, raw = true })
+      return
+    end
+  end
+  if self.HandleAuditCommMessage and self:HandleAuditCommMessage(sender, message, distribution) then
     return
   end
   local success, data = self:Deserialize(message)
@@ -464,20 +871,14 @@ function GLD:RequestRollSessionSnapshot(rollKey, rollID)
     rollKey = rollKey,
     requestedAt = GetServerTime(),
   }
-  local authority = self:GetAuthorityName()
-  if authority and authority ~= "" then
-    self:SendCommMessageSafe(NS.MSG.ROLL_SESSION_REQUEST, payload, "WHISPER", authority)
-  else
-    self:SendCommMessageSafe(NS.MSG.ROLL_SESSION_REQUEST, payload, "RAID")
-  end
+  self:SendCommMessageSafe(NS.MSG.ROLL_SESSION_REQUEST, payload, "RAID")
   if self.IsDebugEnabled and self:IsDebugEnabled() then
     self:Debug(
       "Roll snapshot requested: rollID="
         .. tostring(rollID)
         .. " rollKey="
         .. tostring(rollKey)
-        .. " authority="
-        .. tostring(authority or "raid")
+        .. " authority=raid"
     )
   end
 end
@@ -510,7 +911,7 @@ function GLD:RequestAdminAction(action)
     return false
   end
   if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
-    self:Print("you do not have Guild Permission to access this panel")
+    self:ShowPermissionDeniedPopup()
     return false
   end
   self:SendCommMessageSafe(NS.MSG.ADMIN_REQUEST, {
@@ -521,6 +922,72 @@ function GLD:RequestAdminAction(action)
     self:Debug("Admin request sent: action=" .. tostring(action))
   end
   return true
+end
+
+function GLD:BroadcastNotice(id, text, options)
+  if not text or text == "" then
+    return false
+  end
+  if not IsInRaid() then
+    return false
+  end
+  options = options or {}
+  local channel = options.channel or "RAID"
+  local noticeId = id or ""
+  if options.raw ~= false then
+    local raw = "NOTICE|" .. tostring(noticeId) .. "|" .. tostring(text)
+    self:SendCommMessage(NS.COMM_PREFIX, raw, channel)
+    return true
+  end
+  local payload = {
+    id = noticeId,
+    text = text,
+    title = options.title,
+    audience = options.audience,
+    suppressKey = options.suppressKey,
+    allowSuppress = options.allowSuppress,
+  }
+  self:SendCommMessageSafe(NS.MSG.NOTICE, payload, channel)
+  return true
+end
+
+function GLD:HandleNotice(sender, payload)
+  if not payload or not payload.text then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  if self.IsSenderInRaid and not self:IsSenderInRaid(sender) then
+    return
+  end
+
+  local audience = payload.audience or "GUESTS"
+  if audience == "GUESTS" then
+    if self.ShouldShowGuestNotice and not self:ShouldShowGuestNotice() then
+      return
+    end
+  elseif audience == "ADMINS" then
+    if not (self.CanAccessAdminUI and self:CanAccessAdminUI()) then
+      return
+    end
+  end
+
+  local title = payload.title or "lilyUI"
+  local text = tostring(payload.text)
+  local allowSuppress = payload.allowSuppress
+  if allowSuppress == nil and payload.raw == true and payload.id and payload.id ~= "" then
+    allowSuppress = true
+  end
+  local suppressKey = payload.suppressKey
+  if allowSuppress and not suppressKey and payload.id and payload.id ~= "" then
+    suppressKey = "notice:" .. tostring(payload.id)
+  end
+  if NS and NS.UI and NS.UI.ShowPopup then
+    NS.UI:ShowPopup(title, text, { dontShowKey = suppressKey })
+  elseif self.Print then
+    self:Print(text)
+  end
 end
 
 function GLD:HandleRevisionCheck(sender, payload)
@@ -707,6 +1174,12 @@ function GLD:HandleRollSession(sender, payload)
   session.itemIcon = payload.itemIcon or session.itemIcon
   session.quality = payload.quality or session.quality
   session.count = payload.count or session.count
+  if not session.itemID and session.itemLink and C_Item and C_Item.GetItemInfoInstant then
+    session.itemID = select(1, C_Item.GetItemInfoInstant(session.itemLink))
+  end
+  if self.RequestItemData and (session.itemID or session.itemLink) then
+    self:RequestItemData(session.itemID or session.itemLink)
+  end
   if payload.restrictionSnapshot then
     session.restrictionSnapshot = {}
     for k, v in pairs(payload.restrictionSnapshot) do
@@ -819,6 +1292,10 @@ function GLD:HandleRollSession(sender, payload)
     elseif debugEnabled then
       self:Debug("Roll ack skipped: missing local playerKey.")
     end
+  end
+
+  if self.ApplyCoverStateForRoll then
+    self:ApplyCoverStateForRoll(rollID)
   end
 
   if self.UI and self.UI.RefreshLootWindow then
@@ -977,8 +1454,7 @@ function GLD:HandleRollVote(sender, payload)
     if localKey and localKey == key then
       self:Print(msg)
     else
-      local target = self.GetWhisperTargetForPlayerKey and self:GetWhisperTargetForPlayerKey(key) or nil
-      if target and target ~= "" then
+      if IsInRaid() then
         self:SendCommMessageSafe(NS.MSG.VOTE_CONVERTED, {
           rollID = rollID,
           rollKey = session.rollKey or rollKey,
@@ -987,7 +1463,7 @@ function GLD:HandleRollVote(sender, payload)
           reason = reason,
           reasonText = reasonText,
           voterKey = key,
-        }, "WHISPER", target)
+        }, "RAID")
       else
         self:Print(msg)
       end
@@ -1033,6 +1509,9 @@ end
 function GLD:HandleRollResult(sender, payload)
   if not payload then
     return
+  end
+  if self.ClearCoverOverridesForRoll then
+    self:ClearCoverOverridesForRoll(payload.rollID)
   end
   local debugEnabled = self.IsDebugEnabled and self:IsDebugEnabled()
   if self.IsAuthorizedSender then
@@ -1086,6 +1565,128 @@ function GLD:HandleRollResult(sender, payload)
     self:Debug("Roll result pruned: rollID=" .. tostring(rollID) .. " rollKey=" .. tostring(rollKey) .. " active=" .. tostring(count))
   end
   if self.UI and self.UI.ShowRollResultPopup then
+    local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
+    local localFull = self.GetUnitFullName and self:GetUnitFullName("player") or nil
+    local localShort = UnitName("player")
+    local isWinner = false
+    if localKey and payload.winnerKey and payload.winnerKey == localKey then
+      isWinner = true
+    elseif localFull and payload.winnerName and payload.winnerName == localFull then
+      isWinner = true
+    elseif localShort and payload.winnerShortName and payload.winnerShortName == localShort then
+      isWinner = true
+    end
+
+    local function CountQueueFromRoster(roster)
+      local count = 0
+      for _, entry in ipairs(roster or {}) do
+        if entry and entry.queuePos then
+          count = count + 1
+        end
+      end
+      return count
+    end
+
+    local function CountQueueFromDb(players)
+      local count = 0
+      for _, player in pairs(players or {}) do
+        if player and player.queuePos then
+          count = count + 1
+        end
+      end
+      return count
+    end
+
+    local function FindQueuePosInRoster(roster, key, name)
+      if not roster then
+        return nil
+      end
+      for _, entry in ipairs(roster) do
+        if entry then
+          if key and entry.key == key then
+            return entry.queuePos
+          end
+          if name then
+            if entry.name == name then
+              return entry.queuePos
+            end
+            if entry.realm and (entry.name .. "-" .. entry.realm) == name then
+              return entry.queuePos
+            end
+          end
+        end
+      end
+      return nil
+    end
+
+    local oldPos = nil
+    local winnerOldPos = nil
+    local queueCount = nil
+    local isAuthority = self.IsAuthority and self:IsAuthority()
+    if isAuthority then
+      local players = self.db and self.db.players or nil
+      oldPos = localKey and players and players[localKey] and players[localKey].queuePos or nil
+      winnerOldPos = payload.winnerKey and players and players[payload.winnerKey] and players[payload.winnerKey].queuePos or nil
+      queueCount = CountQueueFromDb(players)
+    else
+      if self.shadow and self.shadow.my then
+        oldPos = self.shadow.my.queuePos
+      end
+      local roster = self.shadow and self.shadow.roster or nil
+      if winnerOldPos == nil then
+        winnerOldPos = FindQueuePosInRoster(roster, payload.winnerKey, payload.winnerName or payload.winnerShortName)
+      end
+      if oldPos == nil then
+        oldPos = FindQueuePosInRoster(roster, localKey, localFull or localShort)
+      end
+      queueCount = CountQueueFromRoster(roster)
+    end
+
+    local moveMode = "END"
+    if not payload.winnerKey then
+      moveMode = "NONE"
+    elseif self.GetMoveModeForVoteType then
+      moveMode = self:GetMoveModeForVoteType(payload.winnerVote)
+    end
+
+    local function GetWinnerNewPos()
+      if not winnerOldPos or not queueCount or moveMode == "NONE" then
+        return winnerOldPos
+      end
+      if moveMode == "MIDDLE" then
+        local pos = math.floor(queueCount / 2)
+        if pos < 1 then
+          pos = 1
+        end
+        return pos
+      end
+      return queueCount
+    end
+
+    local newPos = oldPos
+    if oldPos and winnerOldPos and queueCount and moveMode ~= "NONE" and payload.winnerKey then
+      local winnerNewPos = GetWinnerNewPos()
+      if oldPos == winnerOldPos then
+        newPos = winnerNewPos
+      elseif winnerNewPos then
+        local pos = oldPos
+        if oldPos > winnerOldPos then
+          pos = pos - 1
+        end
+        if winnerNewPos <= pos then
+          pos = pos + 1
+        end
+        newPos = pos
+      end
+    end
+
+    if GetItemInfo and payload.itemLink and not payload.itemIcon then
+      payload.itemIcon = select(10, GetItemInfo(payload.itemLink))
+    end
+    payload.isWinner = isWinner
+    payload.oldPosition = oldPos
+    payload.newPosition = newPos
+    payload.winnerRoll = payload.winnerRoll or payload.winningRoll
     self.UI:ShowRollResultPopup(payload)
   end
   if self.UI and self.UI.RefreshPendingVotes then
@@ -1096,6 +1697,13 @@ end
 function GLD:HandleVoteConverted(sender, payload)
   if not payload then
     return
+  end
+  local targetKey = payload.voterKey
+  if targetKey then
+    local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
+    if not localKey or localKey ~= targetKey then
+      return
+    end
   end
   local originalVote = payload.voteOriginal or payload.vote
   local effectiveVote = payload.voteEffective or payload.vote
@@ -1190,15 +1798,14 @@ function GLD:HandleRollSessionRequest(sender, payload)
     session = self.activeRolls and rollKey and self.activeRolls[rollKey] or nil
   end
   if session then
-    self:BroadcastRollSession(session, { snapshot = true, reopen = true }, sender)
+    self:BroadcastRollSession(session, { snapshot = true, reopen = true })
     if self.IsDebugEnabled and self:IsDebugEnabled() then
       self:Debug(
         "Roll session resend: rollID="
           .. tostring(session.rollID)
           .. " rollKey="
           .. tostring(session.rollKey)
-          .. " target="
-          .. tostring(sender)
+          .. " target=raid"
       )
     end
     return

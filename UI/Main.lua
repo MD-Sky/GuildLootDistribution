@@ -42,6 +42,9 @@ function UI:ToggleMain()
     self:CreateMainFrame()
     self.mainFrame:Show()
     self:RefreshMain()
+    if self.Tutorial then
+      self.Tutorial:MaybeAutoStart()
+    end
     return
   end
   if self.mainFrame:IsShown() then
@@ -49,6 +52,9 @@ function UI:ToggleMain()
   else
     self.mainFrame:Show()
     self:RefreshMain()
+    if self.Tutorial then
+      self.Tutorial:MaybeAutoStart()
+    end
   end
 end
 
@@ -1559,7 +1565,7 @@ end
 
 function GLD:CreateTable(frame)
   local ui = self.UI
-  local showRemove = self.CanAccessAdminUI and self:CanAccessAdminUI() or false
+  local showRemove = false
   if not ui.rosterColumns or ui.rosterColumnsIsAdmin ~= showRemove then
     ui.rosterColumns = BuildDefaultRosterColumns(showRemove)
     ui.rosterColumnsIsAdmin = showRemove
@@ -1667,7 +1673,7 @@ function GLD:CreateBottomBar(frame)
     if self.CanAccessAdminUI and self:CanAccessAdminUI() then
       action()
     else
-      self:Print("you do not have Guild Permission to access this panel")
+      self:ShowPermissionDeniedPopup()
     end
   end
 
@@ -1679,7 +1685,7 @@ function GLD:CreateBottomBar(frame)
     if requestAction and self.RequestAdminAction and self:RequestAdminAction(requestAction) then
       return
     end
-    self:Print("you do not have Guild Permission to access this panel")
+    self:ShowPermissionDeniedPopup()
   end
 
   local buttonSpacing = 6
@@ -1929,6 +1935,7 @@ end
 function GLD:CreateHeaderButtons(headerRow)
   local ui = self.UI
   ui.headerButtons = {}
+  ui.headerButtonByKey = {}
   for index, col in ipairs(self.rosterColumns or {}) do
     local button = CreateFrame("Button", nil, headerRow, "BackdropTemplate")
     button:SetSize(col.width, ROSTER_HEADER_HEIGHT)
@@ -1964,6 +1971,9 @@ function GLD:CreateHeaderButtons(headerRow)
     end
 
     ui.headerButtons[index] = button
+    if col.key then
+      ui.headerButtonByKey[col.key] = button
+    end
   end
 end
 
@@ -2938,7 +2948,7 @@ function GLD:RefreshGuestAnchors()
     end
     row.addButton:SetScript("OnClick", function()
       if not self.CanMutateState or not self:CanMutateState() then
-        self:Print("you do not have Guild Permission to access this panel")
+        self:ShowPermissionDeniedPopup()
         return
       end
       if inRosterRef then
@@ -3073,23 +3083,13 @@ function UI:SubmitRollVote(session, vote, advanceTest)
   end
 
   if not session.isTest then
-    local authority = GLD:GetAuthorityName()
-    if authority and not GLD:IsAuthority() then
+    if IsInRaid() then
       GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
         rollID = session.rollID,
         rollKey = session.rollKey,
         vote = vote,
         voterKey = key,
-      }, "WHISPER", authority)
-    else
-      if IsInRaid() then
-        GLD:SendCommMessageSafe(NS.MSG.ROLL_VOTE, {
-          rollID = session.rollID,
-          rollKey = session.rollKey,
-          vote = vote,
-          voterKey = key,
-        }, "RAID")
-      end
+      }, "RAID")
     end
   else
     if IsInRaid() then
@@ -3330,144 +3330,285 @@ function UI:ShowRollResultPopup(result)
   frame:SetTitle("Loot Result")
   frame:SetStatusText(result.itemName or "Item")
   frame:SetWidth(420)
-  frame:SetHeight(220)
-  frame:SetLayout("Flow")
+  frame:SetHeight(240)
+  frame:SetLayout("Fill")
   frame:EnableResize(false)
 
-  local itemLabel = AceGUI:Create("InteractiveLabel")
-  itemLabel:SetFullWidth(true)
-  itemLabel:SetText(result.itemLink or result.itemName or "Unknown Item")
-  itemLabel:SetCallback("OnEnter", function()
-    local link = result.itemLink
-    if link and link ~= "" then
-      GameTooltip:SetOwner(frame.frame, "ANCHOR_CURSOR")
-      GameTooltip:SetHyperlink(link)
-      GameTooltip:Show()
+  local function BuildPopup(target)
+    if target._built then
+      return
     end
-  end)
-  itemLabel:SetCallback("OnLeave", function()
-    GameTooltip:Hide()
-  end)
-  frame:AddChild(itemLabel)
+    target._built = true
 
-  local function GetShortName(name)
-    if not name then
-      return nil
+    local content = target.frame
+    target.gldContent = content
+    if content then
+      content:EnableMouse(true)
     end
-    local base = tostring(name)
-    local short = base:match("^[^%-]+")
-    return short or base
+
+    if content and content.SetScript then
+      content:SetScript("OnMouseDown", function()
+        if target and target.Hide then
+          target:Hide()
+        end
+      end)
+    end
+
+    if content then
+      if content.HookScript then
+        content:HookScript("OnHide", function()
+          if target.gldAutoCloseTimer and target.gldAutoCloseTimer.Cancel then
+            target.gldAutoCloseTimer:Cancel()
+          end
+        end)
+      elseif content.SetScript then
+        content:SetScript("OnHide", function()
+          if target.gldAutoCloseTimer and target.gldAutoCloseTimer.Cancel then
+            target.gldAutoCloseTimer:Cancel()
+          end
+        end)
+      end
+    end
+
+    local itemIcon = content:CreateTexture(nil, "ARTWORK")
+    itemIcon:SetSize(40, 40)
+    target.gldItemIcon = itemIcon
+
+    local iconHit = CreateFrame("Frame", nil, content)
+    iconHit:SetAllPoints(itemIcon)
+    iconHit:EnableMouse(true)
+    iconHit:SetScript("OnMouseDown", function()
+      if target and target.Hide then
+        target:Hide()
+      end
+    end)
+    iconHit:SetScript("OnEnter", function()
+      local link = target.gldItemRef
+      if link and link ~= "" then
+        GameTooltip:SetOwner(iconHit, "ANCHOR_RIGHT")
+        GameTooltip:SetHyperlink(link)
+        GameTooltip:Show()
+      end
+    end)
+    iconHit:SetScript("OnLeave", function()
+      GameTooltip:Hide()
+    end)
+    target.gldIconHit = iconHit
+
+    local itemNameLabel = content:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    itemNameLabel:SetJustifyH("CENTER")
+    itemNameLabel:SetWidth(380)
+    target.gldItemNameLabel = itemNameLabel
+
+    local stateLabel = content:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    stateLabel:SetJustifyH("CENTER")
+    stateLabel:SetWidth(380)
+    target.gldStateLabel = stateLabel
+
+    local positionLine = CreateFrame("Frame", nil, content)
+    positionLine:SetHeight(16)
+    target.gldPositionLine = positionLine
+
+    local positionLabel = positionLine:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    positionLabel:SetText("Position:")
+    target.gldPositionLabel = positionLabel
+
+    local oldPosFS = positionLine:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    target.gldOldPosFS = oldPosFS
+
+    local arrowFS = positionLine:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    arrowFS:SetText("->")
+    target.gldArrowFS = arrowFS
+
+    local newPosFS = positionLine:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    target.gldNewPosFS = newPosFS
+
+    local detailLabel = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    detailLabel:SetJustifyH("CENTER")
+    detailLabel:SetWidth(380)
+    target.gldDetailLabel = detailLabel
   end
 
-  local function GetClassColoredName(name, classToken)
-    if not name or name == "" then
-      return ""
+  local function ApplyLayout(target)
+    local content = target.gldContent
+    local itemIcon = target.gldItemIcon
+    local itemNameLabel = target.gldItemNameLabel
+    local stateLabel = target.gldStateLabel
+    local positionLine = target.gldPositionLine
+    local positionLabel = target.gldPositionLabel
+    local oldPosFS = target.gldOldPosFS
+    local arrowFS = target.gldArrowFS
+    local newPosFS = target.gldNewPosFS
+    local detailLabel = target.gldDetailLabel
+
+    itemIcon:ClearAllPoints()
+    itemIcon:SetPoint("TOP", content, "TOP", 0, -36)
+
+    itemNameLabel:ClearAllPoints()
+    itemNameLabel:SetPoint("TOP", itemIcon, "BOTTOM", 0, -6)
+
+    stateLabel:ClearAllPoints()
+    stateLabel:SetPoint("TOP", itemNameLabel, "BOTTOM", 0, -10)
+
+    positionLine:ClearAllPoints()
+    positionLine:SetPoint("TOP", stateLabel, "BOTTOM", 0, -6)
+
+    detailLabel:ClearAllPoints()
+    detailLabel:SetPoint("TOP", positionLine, "BOTTOM", 0, -6)
+
+    local gap = 4
+    local totalWidth = positionLabel:GetStringWidth()
+      + oldPosFS:GetStringWidth()
+      + arrowFS:GetStringWidth()
+      + newPosFS:GetStringWidth()
+      + (gap * 3)
+    if totalWidth < 1 then
+      totalWidth = 1
     end
-    if not classToken or classToken == "" then
-      return name
-    end
-    local token = tostring(classToken):upper()
-    local color = nil
-    if C_ClassColor and C_ClassColor.GetClassColor then
-      color = C_ClassColor.GetClassColor(token)
-    end
-    if not color and RAID_CLASS_COLORS then
-      color = RAID_CLASS_COLORS[token]
-    end
-    if not color then
-      return name
-    end
-    local r = color.r or color[1] or 1
-    local g = color.g or color[2] or 1
-    local b = color.b or color[3] or 1
-    return string.format("|cFF%02x%02x%02x%s|r", math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5), tostring(name))
+    positionLine:SetWidth(totalWidth)
+
+    positionLabel:ClearAllPoints()
+    positionLabel:SetPoint("LEFT", positionLine, "LEFT", 0, 0)
+    oldPosFS:ClearAllPoints()
+    oldPosFS:SetPoint("LEFT", positionLabel, "RIGHT", gap, 0)
+    arrowFS:ClearAllPoints()
+    arrowFS:SetPoint("LEFT", oldPosFS, "RIGHT", gap, 0)
+    newPosFS:ClearAllPoints()
+    newPosFS:SetPoint("LEFT", arrowFS, "RIGHT", gap, 0)
   end
 
-  local function GetVoteLabel(vote)
-    if vote == "NEED" then
-      return "Need"
-    end
-    if vote == "GREED" then
-      return "Greed"
-    end
-    if vote == "TRANSMOG" then
-      return "Mog"
-    end
-    return vote and tostring(vote) or "Roll"
+  BuildPopup(frame)
+
+  if C_Timer and C_Timer.NewTimer then
+    frame.gldAutoCloseTimer = C_Timer.NewTimer(5, function()
+      if frame and frame.frame and frame.frame.IsShown and frame.frame:IsShown() then
+        frame:Hide()
+      end
+    end)
+  elseif C_Timer and C_Timer.After then
+    C_Timer.After(5, function()
+      if frame and frame.frame and frame.frame.IsShown and frame.frame:IsShown() then
+        frame:Hide()
+      end
+    end)
   end
 
-  local function GetWinningRoll(payload)
-    local roll = payload and payload.winningRoll or nil
+  local itemRef = result.itemLink or result.itemID
+  local fallbackName = result.itemName or "Item"
+  local fallbackIcon = result.itemIcon or "Interface\\Icons\\INV_Misc_QuestionMark"
+
+  frame.gldItemRef = itemRef
+  frame.gldFallbackName = fallbackName
+  frame.gldFallbackIcon = fallbackIcon
+
+  local function UpdateItemDisplay(target)
+    local itemNameLabel = target.gldItemNameLabel
+    local itemIcon = target.gldItemIcon
+    if not itemRef or itemRef == "" then
+      itemNameLabel:SetText(fallbackName)
+      itemIcon:SetTexture(fallbackIcon)
+      return true
+    end
+    local name, _, _, _, _, _, _, _, _, icon = GetItemInfo(itemRef)
+    if name and name ~= "" then
+      itemNameLabel:SetText(name)
+    else
+      itemNameLabel:SetText("Loading item...")
+    end
+    itemIcon:SetTexture(icon or fallbackIcon)
+    return name ~= nil and icon ~= nil
+  end
+
+  local function ClearItemEvent(target)
+    local content = target.gldContent
+    if content and content.UnregisterEvent then
+      content:UnregisterEvent("GET_ITEM_INFO_RECEIVED")
+    end
+    if content and content.SetScript then
+      content:SetScript("OnEvent", nil)
+    end
+  end
+
+  if not UpdateItemDisplay(frame) and frame.gldContent and frame.gldContent.RegisterEvent then
+    local content = frame.gldContent
+    content:RegisterEvent("GET_ITEM_INFO_RECEIVED")
+    content:SetScript("OnEvent", function()
+      if UpdateItemDisplay(frame) then
+        ClearItemEvent(frame)
+      end
+    end)
+    if GLD and GLD.RequestItemData and result.itemLink then
+      GLD:RequestItemData(result.itemLink)
+    end
+  end
+
+  if frame.gldContent and frame.gldContent.HookScript then
+    frame.gldContent:HookScript("OnHide", function()
+      ClearItemEvent(frame)
+    end)
+  end
+
+  local function UpdatePopup(target, payload)
+    local isWinner = payload.isWinner
+    if isWinner == nil then
+      local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
+      local localFull = GLD and GLD.GetUnitFullName and GLD:GetUnitFullName("player") or nil
+      local localShort = UnitName("player")
+      if localKey and payload.winnerKey and payload.winnerKey == localKey then
+        isWinner = true
+      elseif localFull and payload.winnerName and payload.winnerName == localFull then
+        isWinner = true
+      elseif localShort and payload.winnerShortName and payload.winnerShortName == localShort then
+        isWinner = true
+      else
+        isWinner = false
+      end
+    end
+
+    local roll = payload.winnerRoll
+    if roll == nil then
+      roll = payload.winningRoll
+    end
     if roll == nil and GLD and GLD.GetWinnerRoll then
       roll = GLD:GetWinnerRoll(payload)
     end
-    return roll
-  end
+    local rollText = roll ~= nil and tostring(roll) or "?"
 
-  local localKey = NS.GetPlayerKeyFromUnit and NS:GetPlayerKeyFromUnit("player") or nil
-  local localFull = GLD and GLD.GetUnitFullName and GLD:GetUnitFullName("player") or nil
-  local localShort = UnitName("player")
+    local stateLabel = target.gldStateLabel
+    local detailLabel = target.gldDetailLabel
+    local positionLabel = target.gldPositionLabel
+    local oldPosFS = target.gldOldPosFS
+    local arrowFS = target.gldArrowFS
+    local newPosFS = target.gldNewPosFS
 
-  local function DidParticipate(payload)
-    local votes = payload and payload.votes or nil
-    if not votes then
-      return false
-    end
-    if localFull and votes[localFull] then
-      return true
-    end
-    if localShort and votes[localShort] then
-      return true
-    end
-    if localKey and votes[localKey] then
-      return true
-    end
-    return false
-  end
-
-  local isWinner = false
-  if localKey and result.winnerKey and result.winnerKey == localKey then
-    isWinner = true
-  elseif localFull and result.winnerName and result.winnerName == localFull then
-    isWinner = true
-  elseif localShort and result.winnerShortName and result.winnerShortName == localShort then
-    isWinner = true
-  end
-
-  local participated = DidParticipate(result)
-  local roll = GetWinningRoll(result)
-  local rollText = roll ~= nil and tostring(roll) or "?"
-  local bodyText = nil
-
-  if isWinner then
-    local instructionVote = result.instructionVote or result.winnerVote
-    local instructionLabel = GetVoteLabel(instructionVote)
-    bodyText = "You are the winner with - " .. rollText .. "\nPlease " .. instructionLabel .. " for your item to claim it"
-  elseif participated then
-    local winnerName = result.winnerShortName or GetShortName(result.winnerName) or "None"
-    local coloredName = GetClassColoredName(winnerName, result.winnerClassToken)
-    bodyText = "Winner: " .. coloredName .. " - " .. rollText .. "\nPlease pass on the item"
-  else
-    local summaryLines = GLD and GLD.BuildRollResultLines and GLD:BuildRollResultLines(result) or nil
-    if summaryLines and #summaryLines > 0 then
-      bodyText = table.concat(summaryLines, "\n")
+    if isWinner then
+      stateLabel:SetText("Item Claimed!")
+      stateLabel:SetTextColor(0.2, 1, 0.2)
+      detailLabel:SetText("Winning Roll: " .. rollText)
+      oldPosFS:SetTextColor(0.2, 1, 0.2)
+      newPosFS:SetTextColor(1, 0.2, 0.2)
     else
-      bodyText = "Winner: " .. tostring(result.winnerName or "None")
+      stateLabel:SetText("Not first in line this time")
+      stateLabel:SetTextColor(1, 0.82, 0.4)
+      local winnerName = payload.winnerName or payload.winnerShortName or "Unknown"
+      if winnerName == "" then
+        winnerName = "Unknown"
+      end
+      detailLabel:SetText("Winner: " .. tostring(winnerName) .. " - Roll: " .. rollText)
+      oldPosFS:SetTextColor(1, 0.2, 0.2)
+      newPosFS:SetTextColor(0.2, 1, 0.2)
     end
+
+    local oldPosText = payload.oldPosition ~= nil and tostring(payload.oldPosition) or "?"
+    local newPosText = payload.newPosition ~= nil and tostring(payload.newPosition) or "?"
+    positionLabel:SetTextColor(0.9, 0.9, 0.9)
+    oldPosFS:SetText(oldPosText)
+    arrowFS:SetTextColor(0.8, 0.8, 0.8)
+    newPosFS:SetText(newPosText)
   end
 
-  local summaryLabel = AceGUI:Create("Label")
-  summaryLabel:SetFullWidth(true)
-  summaryLabel:SetText(bodyText)
-  frame:AddChild(summaryLabel)
-
-  local closeBtn = AceGUI:Create("Button")
-  closeBtn:SetText("OK")
-  closeBtn:SetWidth(100)
-  closeBtn:SetCallback("OnClick", function()
-    frame:Hide()
-  end)
-  frame:AddChild(closeBtn)
+  UpdatePopup(frame, result)
+  ApplyLayout(frame)
 
   self.resultFrame = frame
 end

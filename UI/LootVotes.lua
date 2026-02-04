@@ -709,8 +709,8 @@ local function EnsureLootWindow(self)
 
   local needButton = createVoteButton("Need", "NEED", "BOTTOMLEFT", buttonRow, "BOTTOMLEFT", 0, 0)
   local greedButton = createVoteButton("Greed", "GREED", "BOTTOMRIGHT", buttonRow, "BOTTOMRIGHT", 0, 0)
-  createVoteButton("Transmog", "TRANSMOG", "BOTTOMLEFT", needButton, "TOPLEFT", 0, 4)
-  createVoteButton("Pass", "PASS", "BOTTOMRIGHT", greedButton, "TOPRIGHT", 0, 4)
+  local transmogButton = createVoteButton("Transmog", "TRANSMOG", "BOTTOMLEFT", needButton, "TOPLEFT", 0, 4)
+  local passButton = createVoteButton("Pass", "PASS", "BOTTOMRIGHT", greedButton, "TOPRIGHT", 0, 4)
 
   local pendingPanel = CreateFrame("Frame", nil, frame, "InsetFrameTemplate3")
   pendingPanel:SetPoint("TOPLEFT", activePanel, "BOTTOMLEFT", 0, -PADDING)
@@ -736,12 +736,18 @@ local function EnsureLootWindow(self)
 
   window.frame = frame
   window.closeButton = closeButton
+  window.activePanel = activePanel
   window.activeIcon = activeIcon
   window.activeItemLabel = activeItemLabel
   window.activeStatusLabel = statusLabel
   window.activeMessageLabel = votedLabel
   window.adminOverrideButton = adminOverrideButton
   window.forcePendingButton = forcePendingButton
+  window.buttonRow = buttonRow
+  window.needButton = needButton
+  window.greedButton = greedButton
+  window.transmogButton = transmogButton
+  window.passButton = passButton
   window.voteButtons = voteButtons
   window.pendingPanel = pendingPanel
   window.pendingScroll = pendingScroll
@@ -1107,6 +1113,9 @@ function UI:RefreshLootWindow(options)
     state.activeIndex = nil
   end
   if shouldShow then
+    if UI and UI.mainFrame and UI.mainFrame.IsShown and UI.mainFrame:IsShown() then
+      UI.mainFrame:Hide()
+    end
     window.frame:Show()
     if window.frame.Raise and (options.forceShow or options.reopen) then
       window.frame:Raise()

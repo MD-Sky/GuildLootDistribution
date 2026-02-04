@@ -3,6 +3,7 @@ local ADDON_NAME, NS = ...
 NS.ADDON_NAME = ADDON_NAME
 NS.VERSION = "0.2.1"
 NS.COMM_PREFIX = "GLD1"
+NS.COVER_COMM_PREFIX = "GLD1COV"
 NS.MSG = {
   STATE_SNAPSHOT = "STATE_SNAPSHOT",
   DELTA = "DELTA",
@@ -17,6 +18,7 @@ NS.MSG = {
   SESSION_STATE = "SESSION_STATE",
   REV_CHECK = "REV_CHECK",
   ADMIN_REQUEST = "ADMIN_REQUEST",
+  NOTICE = "NOTICE",
 }
 
 local function SafeGetLib(name)
@@ -95,6 +97,7 @@ function GLD:OnEnable()
   self:RegisterEvent("ENCOUNTER_END", "OnEncounterEnd")
   self:RegisterEvent("INSPECT_READY", "OnInspectReady")
   self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED", "OnPlayerSpecChanged")
+  self:RegisterEvent("GET_ITEM_INFO_RECEIVED", "OnItemInfoReceived")
   if self.TryCreateGuildUIButton then
     self:TryCreateGuildUIButton()
   end
@@ -111,10 +114,20 @@ function GLD:RegisterSlashCommands()
     self.UI:ToggleMain()
   end
 
+  SLASH_GLDTUTORIAL1 = "/gldtutorial"
+  SlashCmdList["GLDTUTORIAL"] = function()
+    GLD.db.config.tutorialSeen = false
+    GLD:MarkDBChanged("tutorialReplay")
+    GLD.UI:ToggleMain()
+    if GLD.UI.Tutorial then
+      GLD.UI.Tutorial:Start(true)
+    end
+  end
+
   SLASH_DISADMIN1 = "/disadmin"
   SlashCmdList["DISADMIN"] = function()
     if not self.CanAccessAdminUI or not self:CanAccessAdminUI() then
-      self:Print("you do not have Guild Permission to access this panel")
+      self:ShowPermissionDeniedPopup()
       return
     end
     self.UI:OpenAdmin()
@@ -123,7 +136,7 @@ function GLD:RegisterSlashCommands()
   SLASH_GLDTEST1 = "/gldtest"
   SlashCmdList["GLDTEST"] = function()
     if not self.CanMutateState or not self:CanMutateState() then
-      self:Print("you do not have Guild Permission to access this panel")
+      self:ShowPermissionDeniedPopup()
       return
     end
     self:SeedTestData()
@@ -132,7 +145,7 @@ function GLD:RegisterSlashCommands()
   SLASH_GLDADMINTEST1 = "/gldadmintest"
   SlashCmdList["GLDADMINTEST"] = function()
     if not self.CanAccessAdminUI or not self:CanAccessAdminUI() then
-      self:Print("you do not have Guild Permission to access this panel")
+      self:ShowPermissionDeniedPopup()
       return
     end
     NS.TestUI:ToggleTestPanel()

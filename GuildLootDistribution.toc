@@ -42,7 +42,10 @@ Minimap.lua
 TestData.lua
 UI\RosterTemplates.xml
 UI\Main.lua
+UI\Popup.lua
 UI\LootVotes.lua
+UI\Tutorial\FakeLootRoll.lua
+UI\Tutorial.lua
 UI\Admin.lua
 UI\TestUI.lua
 UI\HistoryUI.lua

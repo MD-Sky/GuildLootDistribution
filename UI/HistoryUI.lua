@@ -340,7 +340,7 @@ function UI:ToggleHistory()
     return
   end
   if not GLD.CanAccessAdminUI or not GLD:CanAccessAdminUI() then
-    GLD:Print("you do not have Guild Permission to access this panel")
+    GLD:ShowPermissionDeniedPopup()
     return
   end
   local created = false

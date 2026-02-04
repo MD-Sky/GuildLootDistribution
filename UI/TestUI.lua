@@ -1242,7 +1242,7 @@ end
 
 function TestUI:ToggleTestPanel()
   if not GLD:IsAdmin() then
-    GLD:Print("you do not have Guild Permission to access this panel")
+    GLD:ShowPermissionDeniedPopup()
     return
   end
   if not self.testFrame then
@@ -3935,7 +3935,7 @@ end
 
 function TestUI:ToggleTestHistory()
   if not GLD:IsAdmin() then
-    GLD:Print("you do not have Guild Permission to access this panel")
+    GLD:ShowPermissionDeniedPopup()
     return
   end
   self:SetActiveAdminTab("history")
@@ -3956,7 +3956,7 @@ function TestUI:ToggleTestGraphs()
     return
   end
   if not GLD:IsAdmin() then
-    GLD:Print("you do not have Guild Permission to access this panel")
+    GLD:ShowPermissionDeniedPopup()
     return
   end
   if not self.testGraphsFrame then

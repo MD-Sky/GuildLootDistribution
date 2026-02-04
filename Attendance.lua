@@ -68,7 +68,7 @@ function GLD:PromptStartSession()
     return
   end
   if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
-    self:Print("you do not have Guild Permission to access this panel")
+    self:ShowPermissionDeniedPopup()
     return
   end
   local guildCount, nonGuildCount, total = self:GetRaidMemberCounts()
@@ -97,7 +97,7 @@ function GLD:PromptEndSession()
     return
   end
   if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
-    self:Print("you do not have Guild Permission to access this panel")
+    self:ShowPermissionDeniedPopup()
     return
   end
   if not StaticPopupDialogs then
@@ -201,7 +201,7 @@ function GLD:StartSession()
     return
   end
   if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
-    self:Print("you do not have Guild Permission to access this panel")
+    self:ShowPermissionDeniedPopup()
     return
   end
   if self.SetSessionAuthority then
@@ -242,7 +242,7 @@ function GLD:EndSession()
     return
   end
   if self.CanAccessAdminUI and not self:CanAccessAdminUI() then
-    self:Print("you do not have Guild Permission to access this panel")
+    self:ShowPermissionDeniedPopup()
     return
   end
   if self.AutoMarkCurrentGroup then
@@ -434,6 +434,9 @@ function GLD:OnGroupRosterUpdate()
   end
   if sessionActive and self.CheckSessionZoneStatus then
     self:CheckSessionZoneStatus()
+  end
+  if self.MaybeAutoAuditAddons then
+    self:MaybeAutoAuditAddons()
   end
   if self.UI then
     self.UI:RefreshMain()

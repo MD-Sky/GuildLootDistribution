@@ -11,6 +11,9 @@ local DEFAULT_CONFIG = {
   transmogWinnerMove = "NONE",
   greedWinnerMove = "NONE",
   debugLogs = false,
+  tutorialSeen = false,
+  tutorialVersion = 1,
+  popupDismissed = {},
   minimap = {
     hide = false,
     angle = 220,
@@ -36,6 +39,7 @@ local function InitMasterDB()
     lastChanged = 0,
   }
   GuildLootDB.config = GuildLootDB.config or DEFAULT_CONFIG
+  GuildLootDB.config.popupDismissed = GuildLootDB.config.popupDismissed or {}
   GuildLootDB.players = GuildLootDB.players or {}
   GuildLootDB.queue = GuildLootDB.queue or {}
   GuildLootDB.rollHistory = GuildLootDB.rollHistory or {}

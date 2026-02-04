@@ -667,6 +667,69 @@ function GLD:RefreshTrinketRoleOptions(options)
   }
 end
 
+function GLD:BuildAddonAuditOptions()
+  local args = {}
+  local order = 1
+  args.auditButton = {
+    type = "execute",
+    name = "Audit Addons",
+    desc = "Scan raid members for addon installs and versions.",
+    order = order,
+    width = "full",
+    disabled = function()
+      return not GLD:CanRunAddonAudit()
+    end,
+    func = function()
+      GLD:StartAddonAudit(true, false)
+    end,
+  }
+  order = order + 1
+
+  args.auditSummary = {
+    type = "description",
+    name = GLD:GetAddonAuditSummaryText(),
+    order = order,
+    width = "full",
+  }
+  order = order + 1
+
+  args.auditHeader = {
+    type = "description",
+    name = "Player | Status | Version",
+    order = order,
+    width = "full",
+  }
+  order = order + 1
+
+  local rows = GLD:GetAddonAuditRows()
+  if #rows == 0 then
+    args.auditEmpty = {
+      type = "description",
+      name = "No audit results yet.",
+      order = order,
+      width = "full",
+    }
+  else
+    for i, line in ipairs(rows) do
+      args["auditRow_" .. tostring(i)] = {
+        type = "description",
+        name = line,
+        order = order,
+        width = "full",
+      }
+      order = order + 1
+    end
+  end
+  return args
+end
+
+function GLD:RefreshAddonAuditOptions(options)
+  if not options or not options.args or not options.args.addonAudit then
+    return
+  end
+  options.args.addonAudit.args = self:BuildAddonAuditOptions()
+end
+
 function GLD:InitConfig()
   local AceConfig = LibStub("AceConfig-3.0", true)
   local AceConfigDialog = LibStub("AceConfigDialog-3.0", true)
@@ -763,10 +826,18 @@ function GLD:InitConfig()
           },
         },
       },
+      addonAudit = {
+        type = "group",
+        name = "Addon Audit",
+        order = 3,
+        hidden = function() return not GLD:CanLocalSeeAdminUI() end,
+        args = {},
+      },
     },
   }
 
   self:RefreshTrinketRoleOptions(options)
+  self:RefreshAddonAuditOptions(options)
   AceConfig:RegisterOptionsTable("GuildLoot", options)
   self.options = options
 end

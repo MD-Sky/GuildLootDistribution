@@ -338,6 +338,55 @@ function GLD:RequestItemData(item)
   end
 end
 
+function GLD:OnItemInfoReceived(_, itemID, success)
+  if not success or not itemID then
+    return
+  end
+  if not self.activeRolls then
+    return
+  end
+  local matched = false
+  for _, session in pairs(self.activeRolls) do
+    if session and session.itemID == itemID then
+      matched = true
+      if session.itemLink and GetItemInfo then
+        if not session.itemName or session.itemName == "" then
+          session.itemName = GetItemInfo(session.itemLink) or session.itemName
+        end
+        if not session.itemIcon then
+          session.itemIcon = select(10, GetItemInfo(session.itemLink)) or session.itemIcon
+        end
+      end
+    end
+  end
+  if not matched then
+    return
+  end
+  if self._itemInfoRefreshQueued then
+    return
+  end
+  self._itemInfoRefreshQueued = true
+  if C_Timer and C_Timer.After then
+    C_Timer.After(0, function()
+      self._itemInfoRefreshQueued = false
+      if self.UI and self.UI.RefreshLootWindow then
+        self.UI:RefreshLootWindow()
+      end
+      if self.UI and self.UI.RefreshPendingVotes then
+        self.UI:RefreshPendingVotes()
+      end
+    end)
+  else
+    self._itemInfoRefreshQueued = false
+    if self.UI and self.UI.RefreshLootWindow then
+      self.UI:RefreshLootWindow()
+    end
+    if self.UI and self.UI.RefreshPendingVotes then
+      self.UI:RefreshPendingVotes()
+    end
+  end
+end
+
 function GLD:GetItemClassRestrictions(item)
   if not item then
     return nil

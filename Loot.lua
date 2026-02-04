@@ -5,9 +5,86 @@ local LootEngine = NS.LootEngine
 local LiveProvider = NS.LiveProvider
 local TestProvider = NS.TestProvider
 
+local function LBDebugEnabled()
+  return GLD and GLD.lbDebug == true
+end
+
+local function LBPrint(msg, force)
+  if not force and not LBDebugEnabled() then
+    return
+  end
+  if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+    DEFAULT_CHAT_FRAME:AddMessage("[LB] " .. tostring(msg))
+  end
+end
+
+do
+  local version = NS.VERSION
+  if not version and GetAddOnMetadata and NS.ADDON_NAME then
+    version = GetAddOnMetadata(NS.ADDON_NAME, "Version")
+  end
+  local build = nil
+  if GetBuildInfo then
+    build = select(4, GetBuildInfo())
+  end
+  local stamp = date and date("%Y-%m-%d %H:%M:%S") or "unknown time"
+  LBPrint(
+    "Covers module loaded (version="
+      .. tostring(version or "unknown")
+      .. ", build="
+      .. tostring(build or "unknown")
+      .. ", time="
+      .. tostring(stamp)
+      .. ")",
+    true
+  )
+end
+
 function GLD:InitLoot()
   self.activeRolls = {}
   self:RegisterEvent("START_LOOT_ROLL", "OnStartLootRoll")
+  self:RegisterEvent("CANCEL_LOOT_ROLL", "OnCancelLootRoll")
+  self:RegisterEvent("PLAYER_LOGIN", "OnCoverLogin")
+  if self.lbDebug == nil then
+    self.lbDebug = false
+  end
+  SLASH_LBDEBUG1 = "/lbdebug"
+  SlashCmdList["LBDEBUG"] = function()
+    self.lbDebug = not self.lbDebug
+    LBPrint("Debug " .. (self.lbDebug and "enabled" or "disabled"), true)
+  end
+  SLASH_LBLOCK1 = "/lblock"
+  SlashCmdList["LBLOCK"] = function(msg)
+    local mode = tostring(msg or ""):lower():gsub("%s+", "")
+    if mode == "" then
+      mode = "lock_all"
+    end
+    local mapped = {
+      lock_all = "LOCK_ALL",
+      unlock_all = "UNLOCK_ALL",
+      winner = "WINNER",
+      loser = "LOSER",
+    }
+    local applyMode = mapped[mode]
+    if not applyMode then
+      LBPrint("Unknown mode: " .. tostring(msg), true)
+      return
+    end
+    local rollFrame = nil
+    for i = 1, (NUM_GROUP_LOOT_FRAMES or 8) do
+      local frame = _G["GroupLootFrame" .. i] or _G["LootRollFrame" .. i]
+      if frame and frame.IsShown and frame:IsShown() then
+        rollFrame = frame
+        break
+      end
+    end
+    if not rollFrame then
+      LBPrint("No visible roll frame found for manual test", true)
+      return
+    end
+    RollBlockers.SetMode(rollFrame, applyMode)
+    LBPrint("Manual apply " .. applyMode .. " to " .. tostring(rollFrame:GetName() or rollFrame), true)
+  end
   if C_Timer and C_Timer.NewTicker then
     -- Periodic cleanup to keep roll data from growing in long sessions.
     self.cleanupTicker = C_Timer.NewTicker(300, function()
@@ -18,6 +95,1023 @@ function GLD:InitLoot()
       end
     end)
   end
+  if self.InitCoverAuthority then
+    self:InitCoverAuthority()
+  end
+end
+
+local RollBlockers = {
+  byFrame = setmetatable({}, { __mode = "k" }),
+}
+
+GLD.RollBlockers = RollBlockers
+
+local LibCustomGlow = LibStub and LibStub("LibCustomGlow-1.0", true) or nil
+local BLOCKER_TOOLTIP_TEXT = "Waiting for loot decision..."
+
+local function GetTransmogOrDisenchantButton(rollFrame)
+  if not rollFrame then
+    return nil
+  end
+  return rollFrame.TransmogButton or rollFrame.DisenchantButton or rollFrame.Disenchant
+end
+
+local function GetPassButton(rollFrame)
+  if not rollFrame then
+    return nil
+  end
+  return rollFrame.PassButton or rollFrame.Pass
+end
+
+local function SyncBlocker(blocker, button)
+  if not blocker or not button then
+    return
+  end
+  if blocker.GetParent and blocker:GetParent() ~= UIParent then
+    blocker:SetParent(UIParent)
+  end
+  blocker:ClearAllPoints()
+  blocker:SetAllPoints(button)
+  blocker:SetFrameStrata("FULLSCREEN_DIALOG")
+  local level = button.GetFrameLevel and button:GetFrameLevel() or 0
+  blocker:SetFrameLevel(level + 200)
+end
+
+local function CreateBlocker(button)
+  if not button then
+    return nil
+  end
+  local blocker = CreateFrame("Frame", nil, UIParent)
+  blocker:EnableMouse(true)
+  blocker:SetAllPoints(button)
+  blocker:SetFrameStrata("FULLSCREEN_DIALOG")
+  local level = button.GetFrameLevel and button:GetFrameLevel() or 0
+  blocker:SetFrameLevel(level + 200)
+  if blocker.SetPropagateMouseClicks then
+    blocker:SetPropagateMouseClicks(false)
+  end
+  blocker:SetScript("OnMouseDown", function(self)
+    if LBDebugEnabled() then
+      local name = self._gldButtonName or "unknown"
+      LBPrint("blocker clicked over " .. tostring(name))
+    end
+  end)
+  blocker:SetScript("OnMouseUp", function() end)
+  if GameTooltip then
+    blocker:SetScript("OnEnter", function(self)
+      GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+      GameTooltip:SetText(BLOCKER_TOOLTIP_TEXT)
+      GameTooltip:Show()
+    end)
+    blocker:SetScript("OnLeave", function()
+      GameTooltip:Hide()
+    end)
+  end
+  local texture = blocker:CreateTexture(nil, "BACKGROUND")
+  texture:SetAllPoints()
+  texture:SetTexture("Interface\\AddOns\\lilyUI\\Media\\ClickDenied.tga")
+  texture:SetAlpha(0.9)
+  blocker._gldTexture = texture
+  blocker:Hide()
+  return blocker
+end
+
+local function EnsureBlocker(blockers, key, button)
+  if not button then
+    return
+  end
+  if not blockers[key] then
+    blockers[key] = CreateBlocker(button)
+  end
+  SyncBlocker(blockers[key], button)
+end
+
+local function SetHighlight(button, on)
+  if not button then
+    return
+  end
+  if LibCustomGlow and LibCustomGlow.ButtonGlow_Start and LibCustomGlow.ButtonGlow_Stop then
+    if on then
+      LibCustomGlow.ButtonGlow_Start(button)
+    else
+      LibCustomGlow.ButtonGlow_Stop(button)
+    end
+    return
+  end
+  if ActionButton_ShowOverlayGlow and ActionButton_HideOverlayGlow then
+    if on then
+      ActionButton_ShowOverlayGlow(button)
+    else
+      ActionButton_HideOverlayGlow(button)
+    end
+  end
+end
+
+local function ApplyHighlights(rollFrame, mode)
+  if not rollFrame then
+    return
+  end
+  local blockers = RollBlockers.byFrame[rollFrame]
+  local buttons = blockers and blockers.buttons or {}
+  local function Apply(key, on)
+    SetHighlight(buttons[key], on)
+  end
+  if mode == "WINNER" then
+    Apply("need", true)
+    Apply("greed", true)
+    Apply("transmog", true)
+    Apply("pass", false)
+    return
+  end
+  if mode == "LOSER" then
+    Apply("need", false)
+    Apply("greed", false)
+    Apply("transmog", false)
+    Apply("pass", true)
+    return
+  end
+  Apply("need", false)
+  Apply("greed", false)
+  Apply("transmog", false)
+  Apply("pass", false)
+end
+
+function RollBlockers.EnsureForRollFrame(rollFrame)
+  if not rollFrame then
+    return nil
+  end
+  local blockers = RollBlockers.byFrame[rollFrame]
+  if not blockers then
+    blockers = {}
+    RollBlockers.byFrame[rollFrame] = blockers
+  end
+  if not rollFrame._gldBlockerHooksSet then
+    rollFrame:HookScript("OnShow", function()
+      if rollFrame._gldBlockerNeedsOnShow then
+        local mode = rollFrame._gldBlockerOnShowMode or "LOCK_ALL"
+        rollFrame._gldBlockerNeedsOnShow = nil
+        rollFrame._gldBlockerOnShowMode = nil
+        LBPrint("OnShow reapply " .. tostring(mode) .. " for " .. tostring(rollFrame:GetName() or rollFrame))
+        RollBlockers.SetMode(rollFrame, mode)
+      end
+    end)
+    rollFrame:HookScript("OnHide", function()
+      ApplyHighlights(rollFrame, "UNLOCK_ALL")
+      LBPrint("Roll frame hidden: highlights cleared for " .. tostring(rollFrame:GetName() or rollFrame))
+    end)
+    rollFrame._gldBlockerHooksSet = true
+  end
+  blockers.buttons = blockers.buttons or {}
+  blockers.buttons.need = rollFrame.NeedButton or rollFrame.Need
+  blockers.buttons.greed = rollFrame.GreedButton or rollFrame.Greed
+  blockers.buttons.transmog = GetTransmogOrDisenchantButton(rollFrame)
+  blockers.buttons.pass = GetPassButton(rollFrame)
+  if LBDebugEnabled() then
+    local function LogButton(label, button)
+      if not button then
+        LBPrint(label .. ": nil")
+        return
+      end
+      local w = button.GetWidth and button:GetWidth() or 0
+      local h = button.GetHeight and button:GetHeight() or 0
+      local strata = button.GetFrameStrata and button:GetFrameStrata() or "?"
+      local level = button.GetFrameLevel and button:GetFrameLevel() or 0
+      LBPrint(label .. ": " .. tostring(button:GetName() or button) .. " size=" .. tostring(w) .. "x" .. tostring(h) .. " strata=" .. tostring(strata) .. " level=" .. tostring(level))
+      if w == 0 or h == 0 then
+        LBPrint("button size 0x0: layout not ready; reapply next frame / OnShow hook needed")
+      end
+    end
+    LogButton("need", blockers.buttons.need)
+    LogButton("greed", blockers.buttons.greed)
+    LogButton("transmog", blockers.buttons.transmog)
+    LogButton("pass", blockers.buttons.pass)
+    local missing = {}
+    if not blockers.buttons.need then
+      missing[#missing + 1] = "need"
+    end
+    if not blockers.buttons.greed then
+      missing[#missing + 1] = "greed"
+    end
+    if not blockers.buttons.transmog then
+      missing[#missing + 1] = "transmog"
+    end
+    if not blockers.buttons.pass then
+      missing[#missing + 1] = "pass"
+    end
+    if #missing > 0 then
+      LBPrint("missing buttons: " .. table.concat(missing, ", "))
+    end
+  end
+  EnsureBlocker(blockers, "need", blockers.buttons.need)
+  EnsureBlocker(blockers, "greed", blockers.buttons.greed)
+  EnsureBlocker(blockers, "transmog", blockers.buttons.transmog)
+  EnsureBlocker(blockers, "pass", blockers.buttons.pass)
+  return blockers
+end
+
+local function SetBlockerVisible(blocker, button, show)
+  if not blocker then
+    return
+  end
+  if show then
+    if button then
+      blocker._gldButton = button
+      blocker._gldButtonName = button.GetName and button:GetName() or tostring(button)
+      SyncBlocker(blocker, button)
+    end
+    blocker:Show()
+    if blocker.Raise then
+      blocker:Raise()
+    end
+    if LBDebugEnabled() then
+      local w = blocker.GetWidth and blocker:GetWidth() or 0
+      local h = blocker.GetHeight and blocker:GetHeight() or 0
+      if w == 0 or h == 0 then
+        LBPrint("blocker has 0 size: anchor timing problem")
+      end
+    end
+  else
+    blocker:Hide()
+  end
+end
+
+function RollBlockers.SetMode(rollFrame, mode)
+  local blockers = RollBlockers.EnsureForRollFrame(rollFrame)
+  if not blockers then
+    return
+  end
+  if LBDebugEnabled() then
+    local name = rollFrame and (rollFrame.GetName and rollFrame:GetName() or tostring(rollFrame)) or "unknown"
+    LBPrint("SetMode " .. tostring(mode) .. " for " .. tostring(name))
+  end
+  if LBDebugEnabled() then
+    local name = rollFrame and (rollFrame.GetName and rollFrame:GetName() or tostring(rollFrame)) or "unknown"
+    local shown = rollFrame and rollFrame.IsShown and rollFrame:IsShown() or false
+    if not shown then
+      LBPrint("rollFrame hidden when applying " .. tostring(mode) .. ": " .. tostring(name))
+    end
+  end
+  local buttons = blockers.buttons or {}
+  local function ShowForButton(key, show)
+    local button = buttons[key]
+    local blocker = blockers[key]
+    if not button then
+      show = false
+    end
+    if show and blocker and button then
+      blocker:ClearAllPoints()
+      blocker:SetAllPoints(button)
+    end
+    SetBlockerVisible(blocker, button, show)
+  end
+  if mode == "LOCK_ALL" then
+    ShowForButton("need", true)
+    ShowForButton("greed", true)
+    ShowForButton("transmog", true)
+    ShowForButton("pass", true)
+    ApplyHighlights(rollFrame, mode)
+    return
+  end
+  if mode == "WINNER" then
+    ShowForButton("need", false)
+    ShowForButton("greed", false)
+    ShowForButton("transmog", false)
+    ShowForButton("pass", true)
+    ApplyHighlights(rollFrame, mode)
+    return
+  end
+  if mode == "LOSER" then
+    ShowForButton("need", true)
+    ShowForButton("greed", true)
+    ShowForButton("transmog", true)
+    ShowForButton("pass", false)
+    ApplyHighlights(rollFrame, mode)
+    return
+  end
+  ShowForButton("need", false)
+  ShowForButton("greed", false)
+  ShowForButton("transmog", false)
+  ShowForButton("pass", false)
+  ApplyHighlights(rollFrame, mode)
+end
+
+function RollBlockers.ReleaseForRollFrame(rollFrame)
+  if not rollFrame then
+    return
+  end
+  local blockers = RollBlockers.byFrame[rollFrame]
+  if not blockers then
+    return
+  end
+  for _, key in ipairs({ "need", "greed", "transmog", "pass" }) do
+    local blocker = blockers[key]
+    if blocker and blocker.Hide then
+      blocker:Hide()
+    end
+    blockers[key] = nil
+  end
+  blockers.buttons = nil
+  RollBlockers.byFrame[rollFrame] = nil
+end
+
+local function FindRollFrameByID(rollID)
+  if not rollID then
+    return nil
+  end
+  if GroupLootContainer then
+    if GroupLootContainer.GetFrameForLootID then
+      local frame = GroupLootContainer:GetFrameForLootID(rollID)
+      if LBDebugEnabled() then
+        LBPrint("GroupLootContainer:GetFrameForLootID exists, result=" .. tostring(frame and (frame.GetName and frame:GetName() or frame) or "nil"))
+      end
+      if frame then
+        return frame
+      end
+    elseif LBDebugEnabled() then
+      LBPrint("GroupLootContainer:GetFrameForLootID missing")
+    end
+    if GroupLootContainer.GetFrameForRollID then
+      local frame = GroupLootContainer:GetFrameForRollID(rollID)
+      if LBDebugEnabled() then
+        LBPrint("GroupLootContainer:GetFrameForRollID exists, result=" .. tostring(frame and (frame.GetName and frame:GetName() or frame) or "nil"))
+      end
+      if frame then
+        return frame
+      end
+    elseif LBDebugEnabled() then
+      LBPrint("GroupLootContainer:GetFrameForRollID missing")
+    end
+  elseif LBDebugEnabled() then
+    LBPrint("GroupLootContainer missing; fallback to GroupLootFrame scan")
+  end
+  local maxFrames = NUM_GROUP_LOOT_FRAMES or NUM_LOOT_ROLLS or 8
+  for i = 1, maxFrames do
+    local frame = _G["GroupLootFrame" .. i] or _G["LootRollFrame" .. i]
+    if frame and (frame.rollID == rollID or frame.lootID == rollID or frame.LootID == rollID) then
+      if LBDebugEnabled() then
+        LBPrint("Fallback scan matched: " .. tostring(frame:GetName() or frame))
+      end
+      return frame
+    end
+  end
+  if LBDebugEnabled() then
+    LBPrint("Fallback scan: no GroupLootFrame1.." .. tostring(maxFrames) .. " matched rollID=" .. tostring(rollID))
+  end
+  return nil
+end
+
+function RollBlockers.ApplyForRoll(rollID, mode)
+  if not rollID then
+    return nil
+  end
+  local rollFrame = (GLD and GLD._rollFrameByRollID and GLD._rollFrameByRollID[rollID]) or FindRollFrameByID(rollID)
+  if not rollFrame then
+    if LBDebugEnabled() then
+      LBPrint("ApplyForRoll: rollFrame nil for rollID=" .. tostring(rollID))
+    end
+    return nil
+  end
+  if GLD then
+    GLD._rollFrameByRollID = GLD._rollFrameByRollID or {}
+    GLD._rollFrameByRollID[rollID] = rollFrame
+  end
+  RollBlockers.SetMode(rollFrame, mode)
+  return rollFrame
+end
+
+function GLD:LockLootRollButtons(rollID)
+  if not rollID then
+    return
+  end
+  if LBDebugEnabled() then
+    LBPrint("START_LOOT_ROLL: rollID=" .. tostring(rollID))
+  end
+  local rollFrame = FindRollFrameByID(rollID)
+  if not rollFrame then
+    if LBDebugEnabled() then
+      LBPrint("rollFrame nil: lookup mismatch (GroupLootContainer vs GroupLootFrame scan)")
+    end
+    if C_Timer and C_Timer.After then
+      self._pendingRollFrameLookup = self._pendingRollFrameLookup or {}
+      if not self._pendingRollFrameLookup[rollID] then
+        self._pendingRollFrameLookup[rollID] = true
+        C_Timer.After(0, function()
+          self._pendingRollFrameLookup[rollID] = nil
+          self:LockLootRollButtons(rollID)
+        end)
+      end
+    end
+    return
+  end
+  if LBDebugEnabled() then
+    local name = rollFrame.GetName and rollFrame:GetName() or tostring(rollFrame)
+    local shown = rollFrame.IsShown and rollFrame:IsShown() or false
+    local strata = rollFrame.GetFrameStrata and rollFrame:GetFrameStrata() or "?"
+    local level = rollFrame.GetFrameLevel and rollFrame:GetFrameLevel() or 0
+    LBPrint("rollFrame=" .. tostring(name) .. " shown=" .. tostring(shown) .. " strata=" .. tostring(strata) .. " level=" .. tostring(level))
+  end
+  self._rollFrameByRollID = self._rollFrameByRollID or {}
+  self._rollFrameByRollID[rollID] = rollFrame
+  rollFrame._gldBlockerNeedsOnShow = true
+  rollFrame._gldBlockerOnShowMode = "LOCK_ALL"
+  RollBlockers.SetMode(rollFrame, "LOCK_ALL")
+  if LBDebugEnabled() then
+    LBPrint("SetMode LOCK_ALL called")
+  end
+  if C_Timer and C_Timer.After then
+    C_Timer.After(0, function()
+      RollBlockers.SetMode(rollFrame, "LOCK_ALL")
+      if LBDebugEnabled() then
+        LBPrint("Reapplied next frame")
+      end
+    end)
+  end
+end
+
+function GLD:UnlockLootRollButtons(rollID)
+  if not rollID then
+    return
+  end
+  if LBDebugEnabled() then
+    LBPrint("CANCEL_LOOT_ROLL: rollID=" .. tostring(rollID))
+  end
+  local rollFrame = self._rollFrameByRollID and self._rollFrameByRollID[rollID] or nil
+  if not rollFrame then
+    rollFrame = FindRollFrameByID(rollID)
+  end
+  if rollFrame then
+    rollFrame._gldBlockerNeedsOnShow = nil
+    rollFrame._gldBlockerOnShowMode = nil
+    RollBlockers.SetMode(rollFrame, "UNLOCK_ALL")
+    if LBDebugEnabled() then
+      local name = rollFrame.GetName and rollFrame:GetName() or tostring(rollFrame)
+      LBPrint("Unlock rollFrame=" .. tostring(name))
+      LBPrint("SetMode UNLOCK_ALL called")
+    end
+    if RollBlockers.ReleaseForRollFrame then
+      RollBlockers.ReleaseForRollFrame(rollFrame)
+    end
+  elseif LBDebugEnabled() then
+    LBPrint("rollFrame not found on CANCEL_LOOT_ROLL")
+  end
+  if self._rollFrameByRollID then
+    self._rollFrameByRollID[rollID] = nil
+  end
+  if self._pendingRollFrameLookup then
+    self._pendingRollFrameLookup[rollID] = nil
+  end
+end
+
+local function GetResumeMode(self, rollID, playerGUID)
+  local mode = self.GetCoverOverrideMode and self:GetCoverOverrideMode(rollID, playerGUID) or nil
+  if mode ~= "WINNER" and mode ~= "LOSER" then
+    mode = "LOCK_ALL"
+  end
+  return mode
+end
+
+function GLD:ResumeCoverBlockers()
+  if not self.FindActiveRoll then
+    return
+  end
+  local playerGUID = UnitGUID("player")
+  if not playerGUID then
+    return
+  end
+  local seen = {}
+  local function ApplyForFrame(rollID, rollFrame)
+    if not rollID or not rollFrame then
+      return
+    end
+    local _, session = self:FindActiveRoll(nil, rollID)
+    if not session or session.locked then
+      return
+    end
+    if self.IsRollSessionExpired and self:IsRollSessionExpired(session) then
+      return
+    end
+    self._rollFrameByRollID = self._rollFrameByRollID or {}
+    self._rollFrameByRollID[rollID] = rollFrame
+    local mode = GetResumeMode(self, rollID, playerGUID)
+    rollFrame._gldBlockerNeedsOnShow = true
+    rollFrame._gldBlockerOnShowMode = mode
+    RollBlockers.SetMode(rollFrame, mode)
+    if C_Timer and C_Timer.After then
+      C_Timer.After(0, function()
+        RollBlockers.SetMode(rollFrame, mode)
+      end)
+    end
+  end
+
+  if GroupLootContainer and GroupLootContainer.GetFrameForRollID and self.activeRolls then
+    for _, session in pairs(self.activeRolls) do
+      local rollID = session and session.rollID or nil
+      if rollID and not seen[rollID] then
+        local frame = GroupLootContainer:GetFrameForRollID(rollID)
+        if frame then
+          seen[rollID] = true
+          ApplyForFrame(rollID, frame)
+        end
+      end
+    end
+  end
+
+  local maxFrames = NUM_GROUP_LOOT_FRAMES or NUM_LOOT_ROLLS or 8
+  for i = 1, maxFrames do
+    local frame = _G["GroupLootFrame" .. i] or _G["LootRollFrame" .. i]
+    if frame and frame.IsShown and frame:IsShown() then
+      local rollID = frame.rollID or frame.lootID or frame.LootID
+      if rollID and not seen[rollID] then
+        seen[rollID] = true
+        ApplyForFrame(rollID, frame)
+      end
+    end
+  end
+end
+
+function GLD:OnCoverLogin()
+  if C_Timer and C_Timer.After then
+    C_Timer.After(0, function()
+      self:ResumeCoverBlockers()
+    end)
+  else
+    self:ResumeCoverBlockers()
+  end
+end
+
+local COVER_COMM_PREFIX = NS.COVER_COMM_PREFIX or "GLD1COV"
+local COVER_AUTH_PING = "AUTH_PING"
+local COVER_AUTH_CLAIM = "AUTH_CLAIM"
+local COVER_AUTH_SET = "AUTH_SET"
+local COVER_OVR_SET = "OVR_SET"
+local COVER_OVR_CLR = "OVR_CLR"
+local COVER_HEARTBEAT_SECONDS = 2
+local COVER_ELECTION_TIMEOUT = 8
+local COVER_FALLBACK_TIMEOUT = 15
+
+local function GetCoverEpochSeconds()
+  if GetServerTime then
+    return GetServerTime()
+  end
+  return time()
+end
+
+local function GetCoverNow()
+  if GetTime then
+    return GetTime()
+  end
+  return GetCoverEpochSeconds()
+end
+
+local function CompareCoverCandidates(a, b)
+  if a.rankIndex ~= b.rankIndex then
+    return a.rankIndex < b.rankIndex
+  end
+  if a.guid and b.guid and a.guid ~= b.guid then
+    return a.guid < b.guid
+  end
+  local nameA = a.fullName or ""
+  local nameB = b.fullName or ""
+  return nameA < nameB
+end
+
+function GLD:IsHostEligible(unit)
+  if not unit or not UnitExists(unit) then
+    return false
+  end
+  local guildName, _, rankIndex = GetGuildInfo(unit)
+  if not guildName or rankIndex == nil then
+    return false
+  end
+  return rankIndex <= 2
+end
+
+function GLD:IsCoverAuthority()
+  local guid = self.coverAuthorityGUID
+  return guid and UnitGUID("player") == guid or false
+end
+
+function GLD:InitCoverAuthority()
+  if self.coverAuthorityInitialized then
+    return
+  end
+  self.coverAuthorityInitialized = true
+  self.coverOverrides = self.coverOverrides or {}
+  self.coverAppliedModes = self.coverAppliedModes or {}
+  self.coverEpoch = self.coverEpoch or 0
+  self.coverAuthorityGUID = self.coverAuthorityGUID or nil
+  self.coverLastSeen = self.coverLastSeen or GetCoverNow()
+  self.coverFallbackActive = false
+  self.coverLastElectionAt = 0
+
+  if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+    C_ChatInfo.RegisterAddonMessagePrefix(COVER_COMM_PREFIX)
+  end
+  self:RegisterEvent("CHAT_MSG_ADDON", "OnCoverAddonMessage")
+  if C_Timer and C_Timer.NewTicker and not self.coverAuthorityTicker then
+    self.coverAuthorityTicker = C_Timer.NewTicker(COVER_HEARTBEAT_SECONDS, function()
+      if self.OnCoverAuthorityTick then
+        self:OnCoverAuthorityTick()
+      end
+    end)
+  end
+end
+
+function GLD:OnCoverAuthorityTick()
+  local now = GetCoverNow()
+  if self:IsCoverAuthority() then
+    self:SendCoverAuthPing()
+    self.coverLastSeen = now
+    return
+  end
+
+  local lastSeen = self.coverLastSeen or 0
+  local since = now - lastSeen
+  if since > COVER_FALLBACK_TIMEOUT then
+    self:EnableCoverFallback()
+  end
+  if since > COVER_ELECTION_TIMEOUT and self:IsHostEligible("player") then
+    self:RunCoverElection()
+  end
+end
+
+function GLD:EnableCoverFallback()
+  if self.coverFallbackActive then
+    return
+  end
+  self.coverFallbackActive = true
+  self:ApplyCoverStatesForAllActiveRolls()
+end
+
+function GLD:DisableCoverFallback()
+  if not self.coverFallbackActive then
+    return
+  end
+  self.coverFallbackActive = false
+  self:ApplyCoverStatesForAllActiveRolls()
+end
+
+function GLD:NextCoverEpoch()
+  local now = GetCoverEpochSeconds()
+  local current = tonumber(self.coverEpoch) or 0
+  if now <= current then
+    now = current + 1
+  end
+  return now
+end
+
+function GLD:SendCoverMessage(parts)
+  if not C_ChatInfo or not C_ChatInfo.SendAddonMessage then
+    return
+  end
+  if not IsInRaid() then
+    return
+  end
+  local payload = table.concat(parts, " ")
+  C_ChatInfo.SendAddonMessage(COVER_COMM_PREFIX, payload, "RAID")
+end
+
+function GLD:SendCoverAuthPing()
+  if not self:IsCoverAuthority() then
+    return
+  end
+  if not self:IsHostEligible("player") then
+    return
+  end
+  local epoch = tonumber(self.coverEpoch) or self:NextCoverEpoch()
+  self.coverEpoch = epoch
+  local guid = self.coverAuthorityGUID or UnitGUID("player")
+  if not guid then
+    return
+  end
+  self:SendCoverMessage({ COVER_AUTH_PING, tostring(epoch), guid })
+end
+
+function GLD:RunCoverElection()
+  if not IsInRaid() then
+    return
+  end
+  local now = GetCoverNow()
+  if self.coverLastElectionAt and now - self.coverLastElectionAt < COVER_ELECTION_TIMEOUT then
+    return
+  end
+  self.coverLastElectionAt = now
+  local best = self:GetBestCoverCandidate()
+  if not best then
+    return
+  end
+  local myGuid = UnitGUID("player")
+  if myGuid and best.guid == myGuid then
+    local epoch = self:NextCoverEpoch()
+    self:SendCoverMessage({ COVER_AUTH_CLAIM, tostring(epoch), myGuid })
+    self:SendCoverMessage({ COVER_AUTH_SET, tostring(epoch), myGuid })
+    self:ApplyCoverAuthority(epoch, myGuid, "local")
+  end
+end
+
+function GLD:GetBestCoverCandidate()
+  if not IsInRaid() then
+    return nil
+  end
+  local best = nil
+  local count = GetNumGroupMembers()
+  for i = 1, count do
+    local unit = "raid" .. i
+    if UnitExists(unit) and self:IsHostEligible(unit) then
+      local _, _, rankIndex = GetGuildInfo(unit)
+      local candidate = {
+        unit = unit,
+        guid = UnitGUID(unit),
+        fullName = self:GetUnitFullName(unit) or UnitName(unit),
+        rankIndex = rankIndex or 99,
+      }
+      if not best or CompareCoverCandidates(candidate, best) then
+        best = candidate
+      end
+    end
+  end
+  return best
+end
+
+function GLD:ApplyCoverAuthority(epoch, authorityGUID, sender)
+  local previousEpoch = tonumber(self.coverEpoch) or 0
+  if epoch < previousEpoch then
+    return
+  end
+  local previousAuthority = self.coverAuthorityGUID
+  local changedEpoch = epoch ~= previousEpoch
+  local changedAuthority = authorityGUID ~= previousAuthority
+  local hadFallback = self.coverFallbackActive == true
+
+  self.coverEpoch = epoch
+  self.coverAuthorityGUID = authorityGUID
+  self.coverLastSeen = GetCoverNow()
+
+  if changedEpoch then
+    self.coverOverrides = {}
+    self.coverAppliedModes = {}
+  end
+  if authorityGUID and UnitGUID("player") == authorityGUID then
+    if not self.coverIsAuthority then
+      self.coverIsAuthority = true
+      if self.OnBecameAuthority then
+        self:OnBecameAuthority()
+      end
+    end
+  else
+    self.coverIsAuthority = false
+  end
+  if hadFallback then
+    self.coverFallbackActive = false
+  end
+
+  if changedEpoch or changedAuthority or hadFallback then
+    self:ApplyCoverStatesForAllActiveRolls()
+  end
+end
+
+function GLD:OnBecameAuthority()
+  self:Print("You are now host")
+  if self.IsDebugEnabled and self:IsDebugEnabled() then
+    self:Debug("You are now host")
+  end
+end
+
+function GLD:GetCoverOverrideMode(rollID, playerGUID)
+  if not rollID or not playerGUID then
+    return nil
+  end
+  local rollOverrides = self.coverOverrides and self.coverOverrides[rollID] or nil
+  return rollOverrides and rollOverrides[playerGUID] or nil
+end
+
+function GLD:GetCoverAutoMode()
+  if self.coverFallbackActive then
+    return "UNLOCK_ALL"
+  end
+  return "LOCK_ALL"
+end
+
+function GLD:ApplyCoverStateForRoll(rollID)
+  if not rollID then
+    return
+  end
+  local guid = UnitGUID("player")
+  if not guid then
+    return
+  end
+  local mode = self:GetCoverOverrideMode(rollID, guid) or self:GetCoverAutoMode()
+  self.coverAppliedModes = self.coverAppliedModes or {}
+  if self.coverAppliedModes[rollID] == mode then
+    return
+  end
+  local rollFrame = RollBlockers.ApplyForRoll(rollID, mode)
+  if not rollFrame then
+    return
+  end
+  self.coverAppliedModes[rollID] = mode
+end
+
+function GLD:ApplyCoverStatesForAllActiveRolls()
+  if not self._rollFrameByRollID then
+    return
+  end
+  for rollID in pairs(self._rollFrameByRollID) do
+    self:ApplyCoverStateForRoll(rollID)
+  end
+end
+
+function GLD:SetCoverOverride(rollID, playerGUID, mode, broadcast)
+  if not rollID or not playerGUID then
+    return
+  end
+  self.coverOverrides = self.coverOverrides or {}
+  local rollOverrides = self.coverOverrides[rollID]
+  if not rollOverrides then
+    rollOverrides = {}
+    self.coverOverrides[rollID] = rollOverrides
+  end
+  if mode and mode ~= "" then
+    rollOverrides[playerGUID] = mode
+  else
+    rollOverrides[playerGUID] = nil
+  end
+  if playerGUID == UnitGUID("player") then
+    self:ApplyCoverStateForRoll(rollID)
+  end
+  if broadcast and self:IsCoverAuthority() then
+    local epoch = tonumber(self.coverEpoch) or self:NextCoverEpoch()
+    self.coverEpoch = epoch
+    if mode and mode ~= "" then
+      self:SendCoverMessage({ COVER_OVR_SET, tostring(epoch), tostring(rollID), playerGUID, mode })
+    else
+      self:SendCoverMessage({ COVER_OVR_CLR, tostring(epoch), tostring(rollID), playerGUID })
+    end
+  end
+end
+
+function GLD:ClearCoverOverridesForRoll(rollID)
+  if not rollID then
+    return
+  end
+  if self.coverOverrides then
+    self.coverOverrides[rollID] = nil
+  end
+  if self.coverAppliedModes then
+    self.coverAppliedModes[rollID] = nil
+  end
+  local rollFrame = self._rollFrameByRollID and self._rollFrameByRollID[rollID] or FindRollFrameByID(rollID)
+  if rollFrame then
+    RollBlockers.SetMode(rollFrame, "UNLOCK_ALL")
+  end
+end
+
+function GLD:IsCoverSenderEligible(sender)
+  if not sender or sender == "" then
+    return false
+  end
+  if not self.GetUnitForSender then
+    return false
+  end
+  local unit = self:GetUnitForSender(sender)
+  if not unit then
+    return false
+  end
+  return self:IsHostEligible(unit)
+end
+
+function GLD:OnCoverAddonMessage(_, prefix, message, _, sender)
+  if prefix ~= COVER_COMM_PREFIX then
+    return
+  end
+  if type(message) ~= "string" then
+    return
+  end
+  local msgType, epochText, arg1, arg2, arg3 = strsplit(" ", message)
+  local epoch = tonumber(epochText)
+  if not msgType or not epoch then
+    return
+  end
+  if msgType == COVER_AUTH_PING then
+    self:HandleCoverAuthPing(sender, epoch, arg1)
+  elseif msgType == COVER_AUTH_CLAIM then
+    self:HandleCoverAuthClaim(sender, epoch, arg1)
+  elseif msgType == COVER_AUTH_SET then
+    self:HandleCoverAuthSet(sender, epoch, arg1)
+  elseif msgType == COVER_OVR_SET then
+    local rollID = tonumber(arg1)
+    self:HandleCoverOverrideSet(sender, epoch, rollID, arg2, arg3)
+  elseif msgType == COVER_OVR_CLR then
+    local rollID = tonumber(arg1)
+    self:HandleCoverOverrideClear(sender, epoch, rollID, arg2)
+  end
+end
+
+function GLD:HandleCoverAuthPing(sender, epoch, authorityGUID)
+  if not authorityGUID or authorityGUID == "" then
+    return
+  end
+  if not self:IsCoverSenderEligible(sender) then
+    return
+  end
+  local currentEpoch = tonumber(self.coverEpoch) or 0
+  if epoch < currentEpoch then
+    return
+  end
+  local senderGuid = self.GetGuidForSender and self:GetGuidForSender(sender) or nil
+  if senderGuid and senderGuid ~= authorityGUID then
+    return
+  end
+  if not self.coverAuthorityGUID or epoch > currentEpoch then
+    self:ApplyCoverAuthority(epoch, authorityGUID, sender)
+  end
+  if self.coverAuthorityGUID == authorityGUID and epoch == (tonumber(self.coverEpoch) or 0) then
+    self.coverLastSeen = GetCoverNow()
+    if self.coverFallbackActive then
+      self:DisableCoverFallback()
+    end
+  end
+end
+
+function GLD:HandleCoverAuthClaim(sender, epoch, candidateGUID)
+  if not candidateGUID or candidateGUID == "" then
+    return
+  end
+  if not self:IsCoverSenderEligible(sender) then
+    return
+  end
+  local currentEpoch = tonumber(self.coverEpoch) or 0
+  if epoch < currentEpoch then
+    return
+  end
+  self.coverLastClaimAt = GetCoverNow()
+  self.coverLastClaimGuid = candidateGUID
+end
+
+function GLD:HandleCoverAuthSet(sender, epoch, authorityGUID)
+  if not authorityGUID or authorityGUID == "" then
+    return
+  end
+  if not self:IsCoverSenderEligible(sender) then
+    return
+  end
+  local currentEpoch = tonumber(self.coverEpoch) or 0
+  if epoch < currentEpoch then
+    return
+  end
+  local senderGuid = self.GetGuidForSender and self:GetGuidForSender(sender) or nil
+  if senderGuid and senderGuid ~= authorityGUID then
+    return
+  end
+  self:ApplyCoverAuthority(epoch, authorityGUID, sender)
+end
+
+function GLD:HandleCoverOverrideSet(sender, epoch, rollID, playerGUID, mode)
+  if not rollID or not playerGUID or not mode or mode == "" then
+    return
+  end
+  if not self:IsCoverSenderEligible(sender) then
+    return
+  end
+  local currentEpoch = tonumber(self.coverEpoch) or 0
+  if epoch < currentEpoch then
+    return
+  end
+  local senderGuid = self.GetGuidForSender and self:GetGuidForSender(sender) or nil
+  if not self.coverAuthorityGUID and senderGuid then
+    self:ApplyCoverAuthority(epoch, senderGuid, sender)
+  end
+  if senderGuid and self.coverAuthorityGUID and senderGuid ~= self.coverAuthorityGUID then
+    return
+  end
+  if epoch ~= (tonumber(self.coverEpoch) or 0) then
+    return
+  end
+  self:SetCoverOverride(rollID, playerGUID, mode, false)
+end
+
+function GLD:HandleCoverOverrideClear(sender, epoch, rollID, playerGUID)
+  if not rollID or not playerGUID then
+    return
+  end
+  if not self:IsCoverSenderEligible(sender) then
+    return
+  end
+  local currentEpoch = tonumber(self.coverEpoch) or 0
+  if epoch < currentEpoch then
+    return
+  end
+  local senderGuid = self.GetGuidForSender and self:GetGuidForSender(sender) or nil
+  if not self.coverAuthorityGUID and senderGuid then
+    self:ApplyCoverAuthority(epoch, senderGuid, sender)
+  end
+  if senderGuid and self.coverAuthorityGUID and senderGuid ~= self.coverAuthorityGUID then
+    return
+  end
+  if epoch ~= (tonumber(self.coverEpoch) or 0) then
+    return
+  end
+  self:SetCoverOverride(rollID, playerGUID, nil, false)
 end
 
 local function GetRollRemainingTimeMs(session)
@@ -206,10 +1300,6 @@ function GLD:BroadcastRollSession(session, options, target)
   if not payload then
     return
   end
-  if target and target ~= "" then
-    self:SendCommMessageSafe(NS.MSG.ROLL_SESSION, payload, "WHISPER", target)
-    return
-  end
   if not IsInRaid() then
     return
   end
@@ -256,9 +1346,7 @@ function GLD:ScheduleRollSessionResend(session)
           .. tostring(#targets)
       )
     end
-    for _, target in ipairs(targets) do
-      self:BroadcastRollSession(session, { snapshot = true, reopen = true }, target)
-    end
+    self:BroadcastRollSession(session, { snapshot = true, reopen = true })
   end
 
   C_Timer.After(1, checkAndResend)
@@ -281,13 +1369,7 @@ function GLD:BroadcastActiveRollsSnapshot(targets, options)
   local snapshotOptions = options or {}
   for _, session in pairs(self.activeRolls) do
     if session and not session.locked and not session.isTest then
-      if targets and #targets > 0 then
-        for _, target in ipairs(targets) do
-          self:BroadcastRollSession(session, { snapshot = true, reopen = snapshotOptions.reopen }, target)
-        end
-      else
-        self:BroadcastRollSession(session, { snapshot = true, reopen = snapshotOptions.reopen })
-      end
+      self:BroadcastRollSession(session, { snapshot = true, reopen = snapshotOptions.reopen })
     end
   end
 end
@@ -300,15 +1382,7 @@ function GLD:ForcePendingVotesWindow()
     return false
   end
   if self.BroadcastActiveRollsSnapshot then
-    local targets = self:GetMissingAckTargetsForActiveRolls()
-    if #targets == 0 then
-      targets = self:GetRaidWhisperTargets()
-    end
-    if #targets > 0 then
-      self:BroadcastActiveRollsSnapshot(targets, { reopen = true })
-    else
-      self:BroadcastActiveRollsSnapshot()
-    end
+    self:BroadcastActiveRollsSnapshot(nil, { reopen = true })
   end
   local payload = {
     authorityGUID = self:GetAuthorityGUID(),
@@ -431,6 +1505,31 @@ local function GetPlayerInfoForVote(self, session, playerKey)
   local specName = player and (player.specName or player.spec) or nil
   if not classFile and session and session.expectedVoterClasses then
     classFile = session.expectedVoterClasses[playerKey]
+  end
+  local localKey = NS:GetPlayerKeyFromUnit("player")
+  if localKey and playerKey == localKey and (not classFile or classFile == "" or not specName or specName == "") then
+    if (not classFile or classFile == "") and UnitClass then
+      classFile = select(2, UnitClass("player")) or classFile
+    end
+    if not specName or specName == "" then
+      local specIndex = GetSpecialization and GetSpecialization()
+      if specIndex then
+        local specId = GetSpecializationInfo and GetSpecializationInfo(specIndex)
+        if specId and GetSpecializationInfoByID then
+          local _, name = GetSpecializationInfoByID(specId)
+          specName = name or specName
+        end
+      end
+    end
+    local record = self.db and self.db.players and self.db.players[localKey] or nil
+    if record then
+      if classFile and not (record.classFile or record.classFileName or record.classToken or record.class) then
+        record.classFile = classFile
+      end
+      if specName and not (record.specName or record.spec) then
+        record.specName = specName
+      end
+    end
   end
   return classFile, specName, player, provider
 end
@@ -1521,6 +2620,12 @@ function GLD:OnStartLootRoll(event, rollID, rollTime, lootHandle)
     end
     return
   end
+  if self.LockLootRollButtons then
+    self:LockLootRollButtons(rollID)
+  end
+  if self.ApplyCoverStateForRoll then
+    self:ApplyCoverStateForRoll(rollID)
+  end
   if not IsInRaid() or not self.db or not self.db.session or not self.db.session.active then
     if debugEnabled then
       self:Debug("Ignoring START_LOOT_ROLL (not in active raid session): inRaid=" .. tostring(IsInRaid()) .. " hasDB=" .. tostring(self.db ~= nil) .. " sessionActive=" .. tostring(self.db and self.db.session and self.db.session.active))
@@ -1643,6 +2748,18 @@ function GLD:OnStartLootRoll(event, rollID, rollTime, lootHandle)
   C_Timer.After(delay + 6, function()
     self:OnLootHistoryRollChanged()
   end)
+end
+
+function GLD:OnCancelLootRoll(event, rollID)
+  if type(rollID) ~= "number" then
+    return
+  end
+  if self.ClearCoverOverridesForRoll then
+    self:ClearCoverOverridesForRoll(rollID)
+  end
+  if self.UnlockLootRollButtons then
+    self:UnlockLootRollButtons(rollID)
+  end
 end
 
 function GLD:OnLootHistoryRollChanged()

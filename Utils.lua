@@ -184,6 +184,45 @@ function GLD:CanLocalSeeAdminUI()
   return canSee
 end
 
+function GLD:ShouldShowGuestNotice()
+  local canAccess = self.CanAccessAdminUI and self:CanAccessAdminUI() or false
+  local _, _, _, rankIndex = self:IsLocalGuildOfficerOrGM()
+  local notHostEligible = rankIndex ~= nil and rankIndex > 2
+  return notHostEligible or not canAccess
+end
+
+function GLD:ShowPermissionDeniedPopup()
+  local message = "You do not have Guild Permission to access this panel."
+  if NS and NS.UI and NS.UI.ShowPopup then
+    NS.UI:ShowPopup("lilyUI", message)
+    return
+  end
+  if self.Print then
+    self:Print(message)
+  end
+end
+
+function GLD:ShowGuestNotice(bodyText, options)
+  if not bodyText or bodyText == "" then
+    return false
+  end
+  if self.ShouldShowGuestNotice and not self:ShouldShowGuestNotice() then
+    return false
+  end
+  if NS and NS.UI and NS.UI.ShowPopup then
+    NS.UI:ShowPopup((options and options.title) or "lilyUI", bodyText, options)
+    return true
+  end
+  if self.Print then
+    self:Print(bodyText)
+  end
+  return true
+end
+
+function GLD:GetGuestWelcomeText()
+  return "Guest mode: View + Request only.\nUse /gld to open the loot window.\nAsk an officer if you need admin access."
+end
+
 function GLD:IsGuest(unitOrMember)
   local ourGuild = self:GetOurGuildName()
   if type(unitOrMember) == "table" then
@@ -404,8 +443,13 @@ function GLD:MaybeWelcomeGuest(unit, fullName, playerKey, playerEntry)
   if not guestDB.seenGuests[guid] then
     guestDB.seenGuests[guid] = true
     guestDB.lastGuestWelcomeAt[guid] = time()
-    local msg = "Welcome to the Incompetents guild raid. This raid uses our loot system. Guests can vote, but cannot edit our loot table/admin settings."
-    SendChatMessage(msg, "WHISPER", nil, fullName)
+    if self.IsAuthority and self:IsAuthority() and self.BroadcastNotice then
+      local text = self:GetGuestWelcomeText()
+      self:BroadcastNotice("guest_welcome", text, { audience = "GUESTS", allowSuppress = true })
+    end
+    if self.IsDebugEnabled and self:IsDebugEnabled() then
+      self:Debug("Guest welcome notice queued (no whispers): " .. tostring(fullName))
+    end
   end
 end
 
@@ -679,7 +723,7 @@ end
 function GLD:AddGuestFromUnit(unit)
   if self.CanMutateState and not self:CanMutateState() then
     if self.Print then
-      self:Print("you do not have Guild Permission to access this panel")
+      self:ShowPermissionDeniedPopup()
     end
     return
   end
